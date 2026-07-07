@@ -2,23 +2,34 @@ name: Build PyInstaller
 
 on:
   push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build executable
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: linux
+            artifact_path: dist/asic-rs-toolkit
+          - os: windows-latest
+            artifact_name: windows-exe
+            artifact_path: dist/asic-rs-toolkit.exe
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
+        with:
+          enable-cache: true
 
-      - name: Set up Python
+      - name: Install Python
         run: uv python install
 
       - name: Install dependencies
@@ -27,8 +38,9 @@ jobs:
       - name: Build with PyInstaller
         run: uv run pyinstaller asic-rs-toolkit.spec
 
-      - name: Upload build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: asic-rs-toolkit
-          path: dist/
+          name: asic-rs-toolkit-${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
