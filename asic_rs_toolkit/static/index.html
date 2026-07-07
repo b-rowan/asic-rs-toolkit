@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ASIC RS Toolkit</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <aside class="rail">
+      <div class="brand">
+        <div class="mark">AR</div>
+        <div>
+          <strong>ASIC RS</strong>
+          <span>Toolkit</span>
+        </div>
+      </div>
+      <nav>
+        <button class="nav active" data-page="miners">Home</button>
+        <button class="nav" data-page="ranges">IP Ranges</button>
+        <button class="nav" data-page="settings">Settings</button>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">Home</h1>
+          <p id="pageSubtitle">Local pyasic-rs scanner and management console.</p>
+        </div>
+        <div class="top-actions">
+          <button id="liveScanToggle" class="schedule-toggle" type="button" aria-pressed="false">Scan off</button>
+          <button id="liveDataToggle" class="schedule-toggle" type="button" aria-pressed="false">Data off</button>
+          <button id="scanNow" class="btn btn-primary">Scan now</button>
+        </div>
+      </header>
+
+      <section id="ranges" class="page">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>IP Ranges</h2>
+            <span>Format: a-b.c-d.e-f.g-h</span>
+          </div>
+          <div class="range-grid">
+            <label>
+              Range expression
+              <input id="rangeInput" placeholder="192.168.1.1-254" spellcheck="false" />
+            </label>
+            <button id="addRange" class="btn btn-primary">Add range</button>
+          </div>
+          <div id="rangePreview" class="preview"></div>
+          <div id="rangeList" class="chips"></div>
+        </div>
+      </section>
+
+      <section id="miners" class="page active">
+        <div id="homeStats" class="metric-grid"></div>
+        <div class="panel table-panel">
+          <div class="panel-head">
+            <h2>Discovered Miners</h2>
+            <span id="selectionCount">0 selected</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th class="col-select"><input id="selectAll" type="checkbox" /></th>
+                  <th class="col-ip" data-sort="ip">IP</th>
+                  <th class="col-state" data-sort="state">State</th>
+                  <th class="col-make" data-sort="make">Make</th>
+                  <th class="col-model" data-sort="model">Model</th>
+                  <th class="col-firmware" data-sort="firmware">Firmware</th>
+                  <th class="col-hashrate" data-sort="hashrate">Hashrate</th>
+                  <th class="col-watts" data-sort="wattage">Watts</th>
+                  <th class="col-temp" data-sort="temperature">°C</th>
+                  <th class="col-efficiency" data-sort="efficiency">Efficiency</th>
+                  <th class="col-fans" data-sort="fans">Fans</th>
+                  <th class="col-pool" data-sort="pool">Pool</th>
+                </tr>
+              </thead>
+              <tbody id="minerRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="settings" class="page">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Settings</h2>
+              <span>Intervals are in seconds.</span>
+            </div>
+          </div>
+          <div class="form-grid two">
+            <label>
+              Scan interval
+              <input id="scanIntervalInput" type="number" min="5" step="1" />
+            </label>
+            <label>
+              Data update interval
+              <input id="dataUpdateIntervalInput" type="number" min="5" step="1" />
+            </label>
+            <label>
+              Appearance
+              <select id="appearanceSelect">
+                <option value="system">System</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </label>
+          </div>
+          <label class="settings-toggle">
+            <span>
+              <strong>Auto clear offline miners</strong>
+              <small>Remove offline miners from the table and history automatically.</small>
+            </span>
+            <span class="switch">
+              <input id="autoClearOfflineToggle" type="checkbox" />
+              <i></i>
+            </span>
+          </label>
+          <div class="settings-actions">
+            <button id="saveSettings" class="btn btn-primary" type="button">Save settings</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="history" class="page">
+        <div class="panel history-panel">
+          <div class="panel-head">
+            <div>
+              <h2 id="historyTitle">Miner History</h2>
+              <span id="historySubtitle">No miner selected.</span>
+            </div>
+            <div class="history-actions">
+              <button id="openMinerWeb" class="btn" type="button">Open in web</button>
+              <button id="backToMiners" class="btn" type="button">Back to table</button>
+            </div>
+          </div>
+          <div id="historySummary" class="metric-grid compact"></div>
+          <div class="chart-grid">
+            <div class="chart-card">
+              <h3>Hashrate</h3>
+              <div id="hashrateChart" class="history-chart"></div>
+            </div>
+            <div class="chart-card">
+              <h3>Watts and °C</h3>
+              <div id="thermalChart" class="history-chart"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="selectionBar" class="selection-bar" hidden>
+      <div class="selection-summary">
+        <strong id="selectionBarCount">0 selected</strong>
+        <span id="selectionBarHint">Choose an action to apply.</span>
+      </div>
+      <div id="selectionActions" class="selection-actions"></div>
+      <button id="clearSelection" class="btn">Clear</button>
+    </div>
+
+    <dialog id="actionDialog" class="action-dialog">
+      <form method="dialog" class="dialog-panel">
+        <div class="dialog-head">
+          <div>
+            <h2 id="actionTitle">Action</h2>
+            <p id="actionSubtitle"></p>
+          </div>
+          <button class="btn" value="cancel" aria-label="Close">Close</button>
+        </div>
+        <div id="actionOptions"></div>
+        <div class="action-support-grid">
+          <div>
+            <h3>Will apply</h3>
+            <div id="actionSupportedList" class="device-list"></div>
+          </div>
+          <div>
+            <h3>Unsupported</h3>
+            <div id="actionUnsupportedList" class="device-list muted-list"></div>
+          </div>
+        </div>
+        <div id="actionFields" class="form-grid"></div>
+        <details>
+          <summary>Credentials</summary>
+          <div class="form-grid two">
+            <label>Username<input id="authUser" autocomplete="username" /></label>
+            <label>Password<input id="authPass" type="password" autocomplete="current-password" /></label>
+          </div>
+        </details>
+        <div class="dialog-actions">
+          <button class="btn" value="cancel">Cancel</button>
+          <button id="applyAction" class="btn btn-primary" type="button">Apply</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" role="status"></div>
+    <script src="/apexcharts.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
