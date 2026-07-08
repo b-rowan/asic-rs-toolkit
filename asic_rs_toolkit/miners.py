@@ -71,6 +71,7 @@ class MinerRecord(BaseModel):
             "error": self.error,
             "last_seen": self.last_seen,
             "history_count": len(self.history),
+            "latest_history": self.history[-1].model_dump() if self.history else None,
         }
 
 

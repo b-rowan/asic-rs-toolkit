@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import math
 import socket
 import time
@@ -30,6 +31,8 @@ from .ranges import estimate_range_size, iter_ips
 from .storage import ToolkitStore
 
 STATIC_DIR = Path(__file__).with_name("static")
+STATUS_STREAM_HEARTBEAT_SECONDS = 1.0
+LIVE_RELOAD_HEARTBEAT_SECONDS = 15.0
 
 
 class ToolkitState:
@@ -625,17 +628,27 @@ def create_app(state: ToolkitState | None = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/client-error")
+    async def client_error(request: Request) -> dict[str, bool]:
+        payload = await request.json()
+        print("Client JavaScript error:")
+        print(json.dumps(payload, indent=2, default=str))
+        return {"ok": True}
+
     @app.websocket("/api/status-stream")
     async def status_stream(websocket: WebSocket) -> None:
         await websocket.accept()
         version = -1
         try:
             while True:
-                version = await app.state.toolkit.wait_for_status_change(version)
+                version = await app.state.toolkit.wait_for_status_change(
+                    version,
+                    timeout=STATUS_STREAM_HEARTBEAT_SECONDS,
+                )
                 await websocket.send_json(await app.state.toolkit.status())
         except asyncio.CancelledError:
             return
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, OSError, RuntimeError):
             return
 
     @app.websocket("/api/live-reload")
@@ -645,14 +658,16 @@ def create_app(state: ToolkitState | None = None) -> FastAPI:
         try:
             while True:
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(websocket.receive_text(), timeout=1)
+                    await asyncio.wait_for(websocket.receive_text(), timeout=LIVE_RELOAD_HEARTBEAT_SECONDS)
                 current = app.state.static_changes.version()
                 if current > version:
                     version = current
                     await websocket.send_text("reload")
+                else:
+                    await websocket.send_text("heartbeat")
         except asyncio.CancelledError:
             return
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, OSError, RuntimeError):
             return
 
     @app.get("/")
@@ -687,6 +702,7 @@ class ManagedToolkitServer:
             log_level="warning",
             access_log=False,
             lifespan="on",
+            ws_ping_interval=None,
         )
         self.server = uvicorn.Server(self.config)
         self._stopped = False

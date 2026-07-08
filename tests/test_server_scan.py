@@ -7,7 +7,7 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
 from asic_rs_toolkit.miners import AppSettings, MinerRecord
-from asic_rs_toolkit.server import ToolkitState, _seconds_until
+from asic_rs_toolkit.server import ManagedToolkitServer, ToolkitState, _seconds_until
 from asic_rs_toolkit.storage import ToolkitStore
 
 
@@ -47,6 +47,13 @@ async def slow_collect_data(miner: FakeMiner):
 
 
 class ToolkitScanTests(IsolatedAsyncioTestCase):
+    def test_managed_server_disables_protocol_websocket_ping_timeout(self) -> None:
+        managed = ManagedToolkitServer(port=0)
+        try:
+            self.assertIsNone(managed.config.ws_ping_interval)
+        finally:
+            managed._socket.close()
+
     def test_seconds_until_rounds_future_deadlines_up(self) -> None:
         self.assertEqual(_seconds_until(10.1, 10), 1)
         self.assertEqual(_seconds_until(10, 10), 0)
@@ -73,6 +80,7 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
 
             self.assertIsNone(status["last_scan_error"])
             self.assertEqual([miner["ip"] for miner in status["miners"]], ["10.0.0.2", "10.0.0.3"])
+            self.assertIsNotNone(status["miners"][0]["latest_history"])
 
     async def test_status_serializes_timedelta_miner_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

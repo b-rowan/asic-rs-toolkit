@@ -2,14 +2,27 @@ import tempfile
 import time
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import patch
 
 import aiosqlite
 
 from asic_rs_toolkit.miners import AppSettings, HistoryPoint, MinerRecord
-from asic_rs_toolkit.storage import ToolkitStore
+from asic_rs_toolkit.storage import ToolkitStore, default_database_path
 
 
 class ToolkitStoreTests(IsolatedAsyncioTestCase):
+    def test_default_database_path_uses_platform_user_data_path(self) -> None:
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("asic_rs_toolkit.storage.user_data_path", return_value=Path("/tmp/app-data")) as user_data,
+        ):
+            self.assertEqual(default_database_path(), Path("/tmp/app-data") / "toolkit.sqlite3")
+            user_data.assert_called_once_with("asic-rs-toolkit", appauthor=False)
+
+    def test_default_database_path_allows_env_override(self) -> None:
+        with patch.dict("os.environ", {"ASIC_RS_TOOLKIT_DB": "~/custom.sqlite3"}):
+            self.assertEqual(default_database_path(), Path("~/custom.sqlite3").expanduser())
+
     async def test_settings_and_miner_data_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ToolkitStore(Path(directory) / "toolkit.sqlite3")

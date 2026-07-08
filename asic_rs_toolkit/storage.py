@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from platformdirs import user_data_path
 
 from .miners import AppSettings, HISTORY_SECONDS, HistoryPoint, MinerRecord, trim_history
 
@@ -164,11 +165,7 @@ def default_database_path() -> Path:
     if configured:
         return Path(configured).expanduser()
 
-    if os.name == "nt":
-        root = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        root = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return root / "asic-rs-toolkit" / "toolkit.sqlite3"
+    return user_data_path("asic-rs-toolkit", appauthor=False) / "toolkit.sqlite3"
 
 
 def _loads(value: str, fallback: dict[str, Any]) -> dict[str, Any]:

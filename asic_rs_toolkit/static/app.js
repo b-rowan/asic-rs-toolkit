@@ -7,6 +7,8 @@ const state = {
   pendingAction: null,
   history: { ip: null, miner: null, points: [] },
   charts: {},
+  chartHovering: {},
+  chartPending: {},
   activeStatePopover: null,
   settings: { scan_interval: 30, data_update_interval: 30, auto_clear_offline: false, appearance: "system" },
   settingsDirty: false,
@@ -15,6 +17,9 @@ const state = {
   nextScanAtMs: null,
   nextDataAtMs: null,
   schedule: { liveScanning: false, liveDataUpdates: false, hasRanges: false, scanRunning: false, dataUpdateRunning: false },
+  appliedAppearance: null,
+  chartThemeKey: null,
+  chartDebug: {},
 };
 
 const pages = {
@@ -52,6 +57,48 @@ const actionGroups = [
 
 const $ = (id) => document.getElementById(id);
 
+window.addEventListener("error", (event) => {
+  reportClientError({
+    kind: "error",
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno,
+    stack: event.error?.stack,
+  });
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  reportClientError({
+    kind: "unhandledrejection",
+    message: errorMessage(event.reason),
+    stack: event.reason?.stack,
+  });
+});
+
+function reportClientError(payload) {
+  const body = {
+    ...payload,
+    page: state.page,
+    historyIp: state.history.ip,
+    historyPoints: state.history.points.length,
+    charts: state.chartDebug,
+    userAgent: navigator.userAgent,
+    location: window.location.href,
+  };
+  console.error("Client diagnostic", body);
+  fetch("/api/client-error", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+function errorMessage(error) {
+  if (!error) return "Unknown error";
+  return error.message || String(error);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
@@ -76,6 +123,7 @@ function toast(message) {
 
 function showPage(page) {
   hideStatePopover();
+  if (state.page === "history" && page !== "history") destroyHistoryCharts();
   state.page = page;
   document.querySelectorAll(".page").forEach((el) => el.classList.toggle("active", el.id === page));
   document.querySelectorAll(".nav").forEach((el) => el.classList.toggle("active", el.dataset.page === page));
@@ -91,12 +139,37 @@ async function refresh() {
 function applyStatus(data) {
   if (!state.rangesPending) state.ranges = data.ranges || [];
   state.miners = data.miners || [];
+  const historyChanged = mergeActiveHistoryPoint();
   if (!state.settingsDirty) state.settings = data.settings || state.settings;
-  applyAppearance(state.settings.appearance);
+  if (state.appliedAppearance !== state.settings.appearance) applyAppearance(state.settings.appearance);
   state.selected = new Set([...state.selected].filter((ip) => state.miners.some((miner) => miner.ip === ip)));
   updateScheduleState(data);
-  renderAll();
+  renderAll({ updateHistoryCharts: historyChanged });
   if (data.last_scan_error) toast(data.last_scan_error);
+}
+
+function mergeActiveHistoryPoint() {
+  if (state.page !== "history" || !state.history.ip) return false;
+  const miner = state.miners.find((item) => item.ip === state.history.ip);
+  const point = miner?.latest_history;
+  if (!point?.timestamp) return false;
+  const last = state.history.points.at(-1);
+  if (last && Number(last.timestamp) === Number(point.timestamp)) {
+    if (JSON.stringify(last) === JSON.stringify(point)) return false;
+    state.history.points[state.history.points.length - 1] = point;
+  } else if (!last || Number(point.timestamp) > Number(last.timestamp)) {
+    state.history.points.push(point);
+    trimClientHistory();
+  } else {
+    return false;
+  }
+  state.history.miner = miner;
+  return true;
+}
+
+function trimClientHistory() {
+  const cutoff = Date.now() / 1000 - 30 * 60;
+  state.history.points = state.history.points.filter((point) => Number(point.timestamp) >= cutoff);
 }
 
 function updateScheduleState(data) {
@@ -113,12 +186,12 @@ function updateScheduleState(data) {
   renderSchedule();
 }
 
-function renderAll() {
+function renderAll({ updateHistoryCharts = true } = {}) {
   if (!state.rangesPending) renderRanges();
   renderSettings();
   renderHomeStats();
   renderTable();
-  if (state.page === "history" && state.history.ip) renderHistory();
+  if (state.page === "history" && state.history.ip) renderHistory({ updateCharts: updateHistoryCharts });
   renderSelectionBar();
   renderSchedule();
 }
@@ -214,10 +287,56 @@ function getFirmware(miner) {
   return info.firmware || info.firmware_version || info.version || miner.data?.firmware || miner.data?.firmware_version || "-";
 }
 
+function getHostname(miner) {
+  return miner.data?.hostname || "-";
+}
+
 function getHashrate(miner) {
   const rate = miner.data?.hashrate;
   if (!rate) return "";
   return `${number(rate.value)} ${rate.unit || ""}`.trim();
+}
+
+function rateParts(rate) {
+  if (!rate) return { value: "", unit: "" };
+  if (typeof rate === "object") return { value: number(rate.value), unit: rate.unit || "" };
+  return { value: number(rate), unit: "" };
+}
+
+function getHashratePair(miner) {
+  const reported = rateParts(miner.data?.hashrate);
+  const expected = rateParts(miner.data?.expected_hashrate);
+  if (reported.value && expected.value && reported.unit === expected.unit) {
+    return `${reported.value} / ${expected.value} ${reported.unit}`.trim();
+  }
+  const reportedText = `${reported.value} ${reported.unit}`.trim();
+  const expectedText = `${expected.value} ${expected.unit}`.trim();
+  if (reportedText && expectedText) return `${reportedText} / ${expectedText}`;
+  return reportedText || expectedText;
+}
+
+function rateValue(rate) {
+  if (!rate) return 0;
+  if (typeof rate === "object") return numeric(rate.value);
+  return numeric(rate);
+}
+
+function finiteValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getExpectedHashrate(miner) {
+  const rate = miner.data?.expected_hashrate;
+  if (!rate) return "";
+  if (typeof rate === "object") return `${number(rate.value)} ${rate.unit || ""}`.trim();
+  return number(rate);
+}
+
+function getExpectedHashrateValue(miner) {
+  const value = rateValue(miner.data?.expected_hashrate);
+  return value > 0 ? value : null;
 }
 
 function getEfficiency(miner) {
@@ -225,6 +344,78 @@ function getEfficiency(miner) {
   if (!efficiency) return "";
   if (typeof efficiency === "object") return `${number(efficiency.value)} ${efficiency.unit || ""}`.trim();
   return number(efficiency);
+}
+
+function getUptime(miner) {
+  const uptime = miner.data?.uptime;
+  if (!uptime) return "-";
+  if (typeof uptime === "number") return duration(uptime);
+  const text = String(uptime);
+  const seconds = numericDuration(text);
+  if (seconds > 0) return duration(seconds);
+  const match = text.match(/(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.\d+)?$/);
+  if (match) {
+    const hours = Number(match[1] || 0);
+    const minutes = Number(match[2]);
+    const seconds = Number(match[3]);
+    return duration(hours * 3600 + minutes * 60 + seconds);
+  }
+  return text.replace(/^PT/, "").toLowerCase();
+}
+
+function getChips(miner) {
+  const working = miner.data?.working_chips ?? sum(miner.data?.hashboards, "working_chips");
+  const total = miner.data?.total_chips ?? miner.data?.expected_chips ?? sum(miner.data?.hashboards, "expected_chips");
+  if (hasValue(working) && hasValue(total)) return `${number(working)} / ${number(total)}`;
+  if (hasValue(total)) return number(total);
+  return "-";
+}
+
+function getBoards(miner) {
+  const boards = miner.data?.hashboards || [];
+  if (!Array.isArray(boards) || !boards.length) {
+    return hasValue(miner.data?.expected_hashboards) ? `0 / ${number(miner.data.expected_hashboards)}` : "-";
+  }
+  const active = boards.filter((board) => board?.active !== false).length;
+  const expected = miner.data?.expected_hashboards || boards.length;
+  return `${number(active)} / ${number(expected)}`;
+}
+
+function getTuning(miner) {
+  const percent = miner.data?.tuning_percent;
+  const target = miner.data?.scaled_tuning_target || miner.data?.tuning_target;
+  const targetText = tuningTargetText(target);
+  if (hasValue(percent) && targetText) return `${number(percent)}% · ${targetText}`;
+  if (hasValue(percent)) return `${number(percent)}%`;
+  return targetText || "-";
+}
+
+function tuningTargetText(target) {
+  if (!target) return "";
+  if (typeof target === "string") return target;
+  if (target.mode) return String(target.mode);
+  if (target.wattage) return `${number(rateValue(target.wattage))} W`;
+  if (target.watts) return `${number(rateValue(target.watts))} W`;
+  if (target.hashrate) {
+    const rate = target.hashrate;
+    return typeof rate === "object" ? `${number(rate.value)} ${rate.unit || ""}`.trim() : number(rate);
+  }
+  return "";
+}
+
+function getTuningTargetWattage(miner) {
+  return tuningTargetWattageValue(miner.data?.scaled_tuning_target) ?? tuningTargetWattageValue(miner.data?.tuning_target);
+}
+
+function tuningTargetWattageValue(target) {
+  if (!target || typeof target !== "object") return null;
+  const direct = finiteValue(target.wattage) ?? finiteValue(target.watts);
+  if (direct !== null) return direct;
+  const nested = rateValue(target.wattage || target.watts || target.power);
+  if (nested > 0) return nested;
+  const type = String(target.type || target.mode || target.kind || "").toLowerCase();
+  if (type.includes("watt")) return finiteValue(target.value);
+  return null;
 }
 
 function getFans(miner) {
@@ -252,6 +443,35 @@ function number(value) {
   return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
+function sum(items, key) {
+  if (!Array.isArray(items)) return null;
+  const values = items.map((item) => Number(item?.[key])).filter(Number.isFinite);
+  return values.length ? values.reduce((total, value) => total + value, 0) : null;
+}
+
+function duration(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(Number(totalSeconds)));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return `${days}d ${hours}h`;
+  if (hours) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+function numericDuration(value) {
+  if (!value) return 0;
+  if (typeof value === "number") return value;
+  const text = String(value);
+  const iso = text.match(/^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/i);
+  if (iso) {
+    return Number(iso[1] || 0) * 86400 + Number(iso[2] || 0) * 3600 + Number(iso[3] || 0) * 60 + Number(iso[4] || 0);
+  }
+  const match = text.match(/(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.\d+)?$/);
+  if (!match) return 0;
+  return Number(match[1] || 0) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
 function renderHomeStats() {
   const miners = state.miners;
   const totalWatts = miners.reduce((sum, miner) => sum + numeric(miner.data?.wattage), 0);
@@ -263,7 +483,7 @@ function renderHomeStats() {
   $("homeStats").innerHTML = [
     metricCard("Miners", number(miners.length), `${mining} mining`),
     metricCard("Issues", number(issues), issues ? "Needs attention" : "No active issues"),
-    metricCard("Hashrate", `${number(hashrates.reduce((sum, value) => sum + value, 0))} ${unit}`.trim() || "-", "Reported total"),
+    metricCard("Hashrate", hashrates.length ? `${number(hashrates.reduce((sum, value) => sum + value, 0))} ${unit}`.trim() : "-", "Reported total"),
     metricCard("Power", totalWatts ? `${number(totalWatts)} W` : "-", "Reported draw"),
     metricCard("Average °C", temps.length ? number(temps.reduce((sum, value) => sum + value, 0) / temps.length) : "-", "Online miners"),
   ].join("");
@@ -331,6 +551,7 @@ function applyAppearance(appearance = "system") {
   const mode = ["system", "light", "dark"].includes(appearance) ? appearance : "system";
   document.documentElement.dataset.theme = mode;
   document.documentElement.style.colorScheme = mode === "system" ? "light dark" : mode;
+  state.appliedAppearance = mode;
   updateChartThemes();
 }
 
@@ -338,6 +559,13 @@ function updateChartThemes() {
   if (!Object.keys(state.charts).length) return;
   if (state.page !== "history" || !state.history.ip) return;
   renderHistory();
+}
+
+function destroyHistoryCharts() {
+  Object.values(state.charts).forEach((chart) => chart.instance.destroy());
+  state.charts = {};
+  state.chartHovering = {};
+  state.chartPending = {};
 }
 
 function renderTable() {
@@ -353,7 +581,7 @@ function renderTable() {
       <td class="col-make">${escapeHtml(getMake(miner))}</td>
       <td class="col-model">${escapeHtml(getModel(miner))}</td>
       <td class="col-firmware">${escapeHtml(getFirmware(miner))}</td>
-      <td>${escapeHtml(getHashrate(miner) || "-")}</td>
+      <td>${escapeHtml(getHashratePair(miner) || "-")}</td>
       <td>${escapeHtml(number(miner.data?.wattage) || "-")}</td>
       <td>${escapeHtml(number(miner.data?.average_temperature) || "-")}</td>
       <td>${escapeHtml(getEfficiency(miner) || "-")}</td>
@@ -369,11 +597,17 @@ function sortMiner(a, b) {
     ip: [a.ip, b.ip],
     make: [getMake(a), getMake(b)],
     model: [getModel(a), getModel(b)],
+    hostname: [getHostname(a), getHostname(b)],
     firmware: [getFirmware(a), getFirmware(b)],
-    hashrate: [a.data?.hashrate?.value || 0, b.data?.hashrate?.value || 0],
+    hashrate: [rateValue(a.data?.hashrate), rateValue(b.data?.hashrate)],
+    expected_hashrate: [rateValue(a.data?.expected_hashrate), rateValue(b.data?.expected_hashrate)],
     wattage: [a.data?.wattage || 0, b.data?.wattage || 0],
     temperature: [a.data?.average_temperature || 0, b.data?.average_temperature || 0],
     efficiency: [numeric(a.data?.efficiency?.value || a.data?.efficiency), numeric(b.data?.efficiency?.value || b.data?.efficiency)],
+    uptime: [numericDuration(a.data?.uptime), numericDuration(b.data?.uptime)],
+    chips: [numeric(a.data?.working_chips ?? sum(a.data?.hashboards, "working_chips")), numeric(b.data?.working_chips ?? sum(b.data?.hashboards, "working_chips"))],
+    boards: [numeric(a.data?.hashboards?.length), numeric(b.data?.hashboards?.length)],
+    tuning: [numeric(a.data?.tuning_percent), numeric(b.data?.tuning_percent)],
     fans: [getFans(a), getFans(b)],
     pool: [getPool(a), getPool(b)],
     state: [minerState(a).order, minerState(b).order],
@@ -446,7 +680,7 @@ async function openHistory(ip) {
   renderHistory();
 }
 
-function renderHistory() {
+function renderHistory({ updateCharts = true } = {}) {
   const { ip, miner, points } = state.history;
   const latest = points.at(-1) || {};
   $("historyTitle").textContent = ip || "Miner History";
@@ -454,50 +688,171 @@ function renderHistory() {
   $("openMinerWeb").disabled = !ip;
   $("historySummary").innerHTML = [
     metricCard("Samples", number(points.length), "Last 30 minutes"),
-    metricCard("Hashrate", hasValue(latest.hashrate_value) ? `${number(latest.hashrate_value)} ${latest.hashrate_unit || ""}`.trim() : "-", "Latest sample"),
+    metricCard("Hashrate", miner ? getHashratePair(miner) || "-" : "-", "Reported / expected"),
     metricCard("Power", hasValue(latest.wattage) ? `${number(latest.wattage)} W` : "-", "Latest sample"),
     metricCard("°C", hasValue(latest.temperature) ? number(latest.temperature) : "-", "Latest sample"),
     metricCard("Efficiency", hasValue(latest.efficiency) ? number(latest.efficiency) : "-", "Latest sample"),
+    metricCard("Hostname", miner ? getHostname(miner) : "-", "Reported by miner"),
+    metricCard("Uptime", miner ? getUptime(miner) : "-", "Current session"),
+    metricCard("Chips", miner ? getChips(miner) : "-", "Working / expected"),
+    metricCard("Boards", miner ? getBoards(miner) : "-", "Active / expected"),
+    metricCard("Tuning", miner ? getTuning(miner) : "-", "Current target"),
   ].join("");
-  renderHistoryChart("hashrateChart", points, [
-    { key: "hashrate_value", label: latest.hashrate_unit || "Hashrate", color: "accent" },
-  ]);
-  renderHistoryChart("thermalChart", points, [
-    { key: "wattage", label: "Watts", color: "info" },
-    { key: "temperature", label: "°C", color: "critical" },
-  ]);
+  if (updateCharts) {
+    const expectedHashrate = miner ? getExpectedHashrateValue(miner) : null;
+    const targetWattage = miner ? getTuningTargetWattage(miner) : null;
+    renderHistoryChart("hashrateChart", points, [
+      { key: "hashrate_value", label: latest.hashrate_unit || "Hashrate", color: "accent" },
+      { key: "temperature", label: "°C", color: "critical" },
+    ], expectedHashrate ? [{
+      seriesKey: "hashrate_value",
+      value: expectedHashrate,
+      label: `Expected ${number(expectedHashrate)} ${latest.hashrate_unit || miner?.data?.expected_hashrate?.unit || ""}`.trim(),
+      color: "warning",
+    }] : [], { showLegend: false });
+    renderHistoryChart("thermalChart", points, [
+      { key: "wattage", label: "Watts", color: "info" },
+    ], targetWattage ? [{
+      seriesKey: "wattage",
+      value: targetWattage,
+      label: `Target ${number(targetWattage)} W`,
+      color: "warning",
+    }] : []);
+  }
 }
 
 function hasValue(value) {
   return value !== null && value !== undefined && value !== "";
 }
 
-function renderHistoryChart(id, points, series) {
+function renderHistoryChart(id, points, series, thresholds = [], settings = {}) {
   if (!window.ApexCharts) return;
-  const options = historyChartOptions(points, series);
-  if (state.charts[id]) {
-    state.charts[id].updateOptions(options, false, true);
+  const options = historyChartOptions(points, series, thresholds, settings);
+  state.chartDebug[id] = chartDebugInfo(id, points, options);
+  const signature = chartSignature(options);
+  if (state.charts[id] && state.chartHovering[id]) {
+    state.chartPending[id] = { options, signature };
     return;
   }
-  state.charts[id] = new ApexCharts($(id), options);
-  state.charts[id].render();
+  applyHistoryChartOptions(id, options, signature);
 }
 
-function historyChartOptions(points, series) {
-  const styles = getComputedStyle(document.documentElement);
-  const text = styles.getPropertyValue("--text-secondary").trim();
-  const muted = styles.getPropertyValue("--text-muted").trim();
-  const border = styles.getPropertyValue("--border-10").trim();
-  const surface = styles.getPropertyValue("--surface-base").trim();
+function applyHistoryChartOptions(id, options, signature = chartSignature(options)) {
+  const existing = state.charts[id];
+  if (existing) {
+    if (existing.signature === signature) {
+      existing.instance.updateSeries(options.series, false).catch((error) => {
+        reportClientError({
+          kind: "chart-series-update",
+          message: errorMessage(error),
+          stack: error?.stack,
+          chart: state.chartDebug[id],
+        });
+        recreateHistoryChart(id, options, signature);
+      });
+    } else {
+      existing.instance.updateOptions(options, false, false).then(() => {
+        existing.signature = signature;
+      }).catch((error) => {
+        reportClientError({
+          kind: "chart-options-update",
+          message: errorMessage(error),
+          stack: error?.stack,
+          chart: state.chartDebug[id],
+        });
+        recreateHistoryChart(id, options, signature);
+      });
+    }
+    return;
+  }
+  recreateHistoryChart(id, options, signature);
+}
+
+function applyPendingChartUpdate(id) {
+  const pending = state.chartPending[id];
+  if (!pending) return;
+  delete state.chartPending[id];
+  applyHistoryChartOptions(id, pending.options, pending.signature);
+}
+
+function recreateHistoryChart(id, options, signature = chartSignature(options)) {
+  if (state.charts[id]) {
+    state.charts[id].instance.destroy();
+    delete state.charts[id];
+  }
+  const instance = new ApexCharts($(id), options);
+  state.charts[id] = { instance, signature };
+  instance.render().catch((error) => {
+    reportClientError({
+      kind: "chart-render",
+      message: errorMessage(error),
+      stack: error?.stack,
+      chart: state.chartDebug[id],
+    });
+    toast(errorMessage(error));
+  });
+}
+
+function chartSignature(options) {
+  return JSON.stringify({
+    annotations: options.annotations?.yaxis?.map((item) => [item.yAxisIndex, item.y, item.label?.text]),
+    colors: options.colors,
+    legend: options.legend.show,
+    labels: options.series.map((item) => item.name),
+    mode: options.theme.mode,
+  });
+}
+
+function historyChartOptions(points, series, thresholds = [], settings = {}) {
+  const text = cssColor("--text-secondary", "#666666");
+  const muted = cssColor("--text-muted", "#888888");
+  const border = cssColor("--border-10", "#e0e0e0");
+  const surface = cssColor("--surface-base", "#ffffff");
   const colors = {
-    accent: styles.getPropertyValue("--core-accent").trim(),
-    info: styles.getPropertyValue("--intent-info").trim(),
-    critical: styles.getPropertyValue("--intent-critical").trim(),
+    accent: cssColor("--core-accent", "#fe7c00"),
+    info: cssColor("--intent-info", "#0096d1"),
+    critical: cssColor("--intent-critical", "#fa2b37"),
+    warning: cssColor("--intent-warning", "#cf8500"),
   };
-  const hasData = points.length > 1 && series.some((item) => points.some((point) => hasValue(point[item.key])));
+  const plottedSeries = series.map((item) => ({
+    ...item,
+    data: historyChartData(points, item.key),
+  })).filter((item) => item.data.length > 1);
+  const chartSeries = plottedSeries.map((item) => ({
+    name: item.label,
+    data: item.data,
+  }));
+  const yaxisAnnotations = thresholds.map((threshold) => {
+    const value = finiteValue(threshold.value);
+    const yAxisIndex = plottedSeries.findIndex((item) => item.key === threshold.seriesKey);
+    if (value === null || yAxisIndex < 0) return null;
+    const color = colors[threshold.color] || muted;
+    return {
+      y: value,
+      yAxisIndex,
+      borderColor: color,
+      borderWidth: 1.5,
+      strokeDashArray: 4,
+      label: {
+        borderColor: color,
+        text: threshold.label,
+        position: "right",
+        offsetX: -6,
+        style: {
+          background: surface,
+          color,
+          fontSize: "11px",
+          fontWeight: 600,
+        },
+      },
+    };
+  }).filter(Boolean);
   return {
+    annotations: {
+      yaxis: yaxisAnnotations,
+    },
     chart: {
-      type: "area",
+      type: "line",
       height: 260,
       parentHeightOffset: 0,
       toolbar: { show: false },
@@ -507,19 +862,16 @@ function historyChartOptions(points, series) {
       foreColor: text,
       sparkline: { enabled: false },
     },
-    colors: series.map((item) => colors[item.color]),
+    colors: plottedSeries.map((item) => colors[item.color] || text),
     dataLabels: { enabled: false },
-    fill: {
-      type: "gradient",
-      gradient: { opacityFrom: 0.22, opacityTo: 0.02, stops: [0, 90, 100] },
-    },
+    fill: { opacity: 1 },
     grid: {
       borderColor: border,
       strokeDashArray: 4,
       padding: { top: 2, right: 12, bottom: 0, left: 8 },
     },
     legend: {
-      show: series.length > 1,
+      show: settings.showLegend ?? plottedSeries.length > 1,
       position: "top",
       horizontalAlign: "left",
       labels: { colors: text },
@@ -533,13 +885,7 @@ function historyChartOptions(points, series) {
       offsetX: 20,
       style: { color: muted, fontSize: "13px" },
     },
-    series: hasData ? series.map((item) => ({
-      name: item.label,
-      data: points.map((point) => ({
-        x: point.timestamp ? point.timestamp * 1000 : Date.now(),
-        y: hasValue(point[item.key]) ? numeric(point[item.key]) : null,
-      })),
-    })) : [],
+    series: chartSeries,
     stroke: { curve: "smooth", width: 2.5, lineCap: "round" },
     theme: { mode: resolvedThemeMode() },
     tooltip: {
@@ -554,13 +900,62 @@ function historyChartOptions(points, series) {
       labels: { style: { colors: muted } },
       tooltip: { enabled: false },
     },
-    yaxis: {
+    yaxis: plottedSeries.map((item, index) => ({
       decimalsInFloat: 1,
+      min: 0,
+      opposite: index > 0,
       labels: {
         style: { colors: muted },
         formatter: (value) => number(value),
       },
-    },
+      title: {
+        text: item.label,
+        style: { color: muted, fontSize: "11px", fontWeight: 500 },
+      },
+    })),
+  };
+}
+
+function historyChartData(points, key) {
+  return points
+    .map((point) => {
+      const x = Number(point.timestamp) * 1000;
+      const y = Number(point[key]);
+      return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+    })
+    .filter(Boolean);
+}
+
+function cssColor(variableName, fallback) {
+  const probe = document.createElement("span");
+  probe.style.color = `var(${variableName})`;
+  probe.style.display = "none";
+  document.body.appendChild(probe);
+  const resolved = getComputedStyle(probe).color;
+  probe.remove();
+  return normalizeCssColor(resolved, fallback);
+}
+
+function normalizeCssColor(value, fallback) {
+  const context = normalizeCssColor.context || (normalizeCssColor.context = document.createElement("canvas").getContext("2d"));
+  context.fillStyle = fallback;
+  context.fillStyle = value;
+  return context.fillStyle || fallback;
+}
+
+function chartDebugInfo(id, points, options) {
+  return {
+    id,
+    theme: resolvedThemeMode(),
+    pointCount: points.length,
+    series: options.series.map((item) => ({
+      name: item.name,
+      length: item.data.length,
+      first: item.data.at(0),
+      last: item.data.at(-1),
+    })),
+    rawFirst: points.at(0),
+    rawLast: points.at(-1),
   };
 }
 
@@ -924,6 +1319,16 @@ document.addEventListener("input", (event) => {
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   if ((document.documentElement.dataset.theme || "system") === "system") updateChartThemes();
+});
+
+["hashrateChart", "thermalChart"].forEach((id) => {
+  $(id).addEventListener("pointerenter", () => {
+    state.chartHovering[id] = true;
+  });
+  $(id).addEventListener("pointerleave", () => {
+    state.chartHovering[id] = false;
+    applyPendingChartUpdate(id);
+  });
 });
 
 $("rangeInput").addEventListener("input", async (event) => {
