@@ -24,6 +24,14 @@ async def fake_stream_scan(expression: str):
     yield FakeMiner("10.0.0.3")
 
 
+async def fake_expression_miner_stream(expression: str):
+    await asyncio.sleep(0)
+    yield FakeMiner({
+        "10.0.0.1": "10.0.0.2",
+        "10.0.1.1-2": "10.0.1.2",
+    }[expression])
+
+
 async def fake_collect_data(miner: FakeMiner):
     return (
         {
@@ -82,6 +90,31 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
             self.assertEqual([miner["ip"] for miner in status["miners"]], ["10.0.0.2", "10.0.0.3"])
             self.assertIsNotNone(status["miners"][0]["latest_history"])
 
+    async def test_scan_uses_only_enabled_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = ToolkitState(ToolkitStore(Path(directory) / "toolkit.sqlite3"))
+            await state.start()
+            await state.set_ranges(["10.0.0.1", "10.0.1.1-2"], [False, True])
+
+            with (
+                patch("asic_rs_toolkit.server.stream_scan_expression", fake_expression_miner_stream),
+                patch("asic_rs_toolkit.server.collect_data", fake_collect_data),
+            ):
+                await state.start_scan()
+                for _ in range(50):
+                    status = await state.status()
+                    if not status["scan_running"]:
+                        break
+                    await asyncio.sleep(0.01)
+
+            status = await state.status()
+            await state.stop()
+
+            self.assertEqual(status["ranges"], ["10.0.0.1", "10.0.1.1-2"])
+            self.assertEqual(status["enabled_ranges"], [False, True])
+            self.assertEqual(status["range_hosts"], [1, 2])
+            self.assertEqual([miner["ip"] for miner in status["miners"]], ["10.0.1.2"])
+
     async def test_status_serializes_timedelta_miner_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state = ToolkitState(ToolkitStore(Path(directory) / "toolkit.sqlite3"))
@@ -94,6 +127,20 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
 
             json.dumps(status)
             self.assertIn("uptime", status["miners"][0]["data"])
+
+    async def test_status_hides_miners_outside_enabled_ranges(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = ToolkitState(ToolkitStore(Path(directory) / "toolkit.sqlite3"))
+            await state.start()
+            await state.set_ranges(["10.0.0.1-2", "10.0.1.1-2"], [True, False])
+            await state._record_for_ip("10.0.0.2")
+            await state._record_for_ip("10.0.1.2")
+            await state._record_for_ip("10.0.2.2")
+
+            status = await state.status()
+            await state.stop()
+
+            self.assertEqual([miner["ip"] for miner in status["miners"]], ["10.0.0.2"])
 
     async def test_live_data_updates_reconnect_persisted_miners_on_startup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

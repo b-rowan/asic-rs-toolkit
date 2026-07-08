@@ -58,6 +58,18 @@ def estimate_range_size(expression: str) -> int:
     return total
 
 
+def ip_in_range_expression(ip: str, expression: str) -> bool:
+    values = tuple(_parse_octet(part) for part in ip.strip().split("."))
+    if len(values) != 4:
+        raise ValueError(f"Invalid IP address {ip!r}; use four dot-separated octets.")
+    octets = parse_range_expression(expression)
+    return all(octet.start <= value <= octet.end for value, octet in zip(values, octets, strict=True))
+
+
+def ip_in_any_range(ip: str, expressions: list[str]) -> bool:
+    return any(ip_in_range_expression(ip, expression) for expression in expressions)
+
+
 def iter_ips(expression: str, limit: int | None = None) -> list[str]:
     octets = parse_range_expression(expression)
     ips: list[str] = []

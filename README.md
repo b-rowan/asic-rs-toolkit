@@ -28,6 +28,7 @@ uv run pyinstaller asic-rs-toolkit.spec
 ```
 
 The executable is written to `dist/asic-rs-toolkit` on Linux and `dist/asic-rs-toolkit.exe` on Windows.
+The PyInstaller build is windowed, so the Windows executable starts without opening a separate CLI console window.
 
 ## Features
 

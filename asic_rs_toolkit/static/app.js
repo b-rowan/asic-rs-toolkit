@@ -1,8 +1,11 @@
 const state = {
   ranges: [],
+  enabledRanges: [],
+  rangeHosts: [],
   miners: [],
   selected: new Set(),
   sort: { key: "ip", direction: "asc" },
+  table: { page: 1, pageSize: 10 },
   page: "miners",
   pendingAction: null,
   history: { ip: null, miner: null, points: [] },
@@ -137,8 +140,13 @@ async function refresh() {
 }
 
 function applyStatus(data) {
-  if (!state.rangesPending) state.ranges = data.ranges || [];
+  if (!state.rangesPending && !isEditingRange()) {
+    state.ranges = data.ranges || [];
+    state.enabledRanges = normalizeEnabledRanges(data.enabled_ranges || [], state.ranges);
+    state.rangeHosts = normalizeRangeHosts(data.range_hosts || [], state.ranges);
+  }
   state.miners = data.miners || [];
+  clampTablePage();
   const historyChanged = mergeActiveHistoryPoint();
   if (!state.settingsDirty) state.settings = data.settings || state.settings;
   if (state.appliedAppearance !== state.settings.appearance) applyAppearance(state.settings.appearance);
@@ -179,7 +187,7 @@ function updateScheduleState(data) {
   state.schedule = {
     liveScanning: !!data.live_scanning,
     liveDataUpdates: !!data.live_data_updates,
-    hasRanges: (data.ranges || []).length > 0,
+    hasRanges: normalizeEnabledRanges(data.enabled_ranges || [], data.ranges || []).some(Boolean),
     scanRunning: !!data.scan_running,
     dataUpdateRunning: !!data.data_update_running,
   };
@@ -187,7 +195,7 @@ function updateScheduleState(data) {
 }
 
 function renderAll({ updateHistoryCharts = true } = {}) {
-  if (!state.rangesPending) renderRanges();
+  if (!state.rangesPending && !isEditingRange()) renderRanges();
   renderSettings();
   renderHomeStats();
   renderTable();
@@ -429,11 +437,52 @@ function getFans(miner) {
 }
 
 function getPool(miner) {
-  const pools = miner.data?.pools || miner.data?.pool_data || [];
-  const active = Array.isArray(pools)
-    ? pools.find((pool) => pool?.active || pool?.status === "active" || pool?.is_active) || pools[0]
-    : null;
-  return active?.url || active?.pool_url || active?.user || active?.username || "-";
+  const active = getActivePool(miner);
+  return poolValue(active, ["url", "pool_url", "poolUrl", "stratum_url", "stratumUrl", "uri"]) || "-";
+}
+
+function getPoolUser(miner) {
+  const active = getActivePool(miner);
+  return poolValue(active, ["user", "username", "pool_user", "poolUser", "worker", "worker_name", "workerName"]) || "-";
+}
+
+function getActivePool(miner) {
+  const pools = poolCandidates(miner);
+  return pools.find(isActivePool) || pools[0] || null;
+}
+
+function poolCandidates(miner) {
+  const sources = [
+    miner.data?.pools,
+    miner.data?.pool_data,
+    miner.data?.poolData,
+    miner.data?.active_pool,
+    miner.data?.activePool,
+  ];
+  return sources.flatMap(flattenPools).filter((pool) => pool && typeof pool === "object");
+}
+
+function flattenPools(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.flatMap(flattenPools);
+  if (typeof value !== "object") return [];
+  const nested = [value.pools, value.pool_data, value.poolData].flatMap(flattenPools);
+  return nested.length ? nested : [value];
+}
+
+function isActivePool(pool) {
+  if (pool.active === true || pool.is_active === true || pool.current === true || pool.selected === true) return true;
+  const status = String(pool.status || pool.state || pool.pool_status || "").toLowerCase();
+  return ["active", "alive", "connected", "current", "working"].includes(status);
+}
+
+function poolValue(pool, keys) {
+  if (!pool) return "";
+  for (const key of keys) {
+    const value = pool[key];
+    if (value !== undefined && value !== null && value !== "") return String(value);
+  }
+  return "";
 }
 
 function number(value) {
@@ -505,20 +554,97 @@ function numeric(value) {
 }
 
 function renderRanges() {
-  $("rangeList").innerHTML = state.ranges.map((range, index) => `
-    <span class="chip">${escapeHtml(range)}<button class="btn" data-remove-range="${index}">x</button></span>
-  `).join("");
+  if (!state.ranges.length) {
+    $("rangeList").innerHTML = "";
+    return;
+  }
+  $("rangeList").innerHTML = `
+    <table class="range-table">
+      <thead>
+        <tr>
+          <th class="range-enabled">Enabled</th>
+          <th>Range</th>
+          <th class="range-hosts">Hosts</th>
+          <th class="range-remove"></th>
+        </tr>
+      </thead>
+      <tbody>
+        ${state.ranges.map((range, index) => `
+          <tr class="${state.enabledRanges[index] ? "" : "off"}">
+            <td class="range-enabled">
+              <label class="switch range-switch" title="${state.enabledRanges[index] ? "Disable range" : "Enable range"}">
+                <input type="checkbox" data-range-enabled="${index}" ${state.enabledRanges[index] ? "checked" : ""} />
+                <i></i>
+              </label>
+            </td>
+            <td class="range-expression">
+              <input class="range-edit-input" data-range-edit="${index}" value="${escapeHtml(range)}" spellcheck="false" aria-label="Edit range ${escapeHtml(range)}" />
+            </td>
+            <td class="range-hosts">${number(state.rangeHosts[index] ?? 0)}</td>
+            <td class="range-remove">
+              <button class="icon-btn danger" data-remove-range="${index}" aria-label="Remove ${escapeHtml(range)}" title="Remove range">&#128465;</button>
+            </td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
 }
 
 async function persistRanges(message = "Ranges updated") {
   state.rangesPending = true;
   try {
-    const data = await post("/api/ranges", { ranges: state.ranges });
+    state.enabledRanges = normalizeEnabledRanges(state.enabledRanges, state.ranges);
+    const data = await post("/api/ranges", { ranges: state.ranges, enabled_ranges: state.enabledRanges });
     state.ranges = data.ranges || [];
+    state.enabledRanges = normalizeEnabledRanges(data.enabled_ranges || [], state.ranges);
+    state.rangeHosts = normalizeRangeHosts(data.range_hosts || [], state.ranges);
     renderRanges();
     toast(message);
   } finally {
     state.rangesPending = false;
+  }
+}
+
+function normalizeEnabledRanges(enabledRanges, ranges) {
+  return ranges.map((_, index) => index < enabledRanges.length ? !!enabledRanges[index] : true);
+}
+
+function normalizeRangeHosts(rangeHosts, ranges) {
+  return ranges.map((_, index) => Number.isFinite(Number(rangeHosts[index])) ? Number(rangeHosts[index]) : 0);
+}
+
+function isEditingRange() {
+  return document.activeElement instanceof HTMLElement && document.activeElement.matches("[data-range-edit]");
+}
+
+function isEditingTablePager() {
+  return document.activeElement instanceof HTMLElement && document.activeElement.id === "minerPageSize";
+}
+
+async function editRange(index, value) {
+  const range = value.trim();
+  if (range === state.ranges[index]) {
+    renderRanges();
+    return;
+  }
+  if (!range) {
+    renderRanges();
+    toast("Range expression is required");
+    return;
+  }
+  const previous = [...state.ranges];
+  const previousHosts = [...state.rangeHosts];
+  state.ranges[index] = range;
+  state.rangeHosts[index] = 0;
+  renderRanges();
+  try {
+    await persistRanges("Range updated");
+  } catch (error) {
+    state.ranges = previous;
+    state.rangeHosts = previousHosts;
+    renderRanges();
+    toast(error.message);
   }
 }
 
@@ -552,7 +678,15 @@ function applyAppearance(appearance = "system") {
   document.documentElement.dataset.theme = mode;
   document.documentElement.style.colorScheme = mode === "system" ? "light dark" : mode;
   state.appliedAppearance = mode;
+  updateFavicon(mode);
   updateChartThemes();
+}
+
+function updateFavicon(appearance = "system") {
+  const favicon = $("favicon");
+  if (!favicon) return;
+  const mode = appearance === "system" ? resolvedThemeMode() : appearance;
+  favicon.href = mode === "dark" ? "/assets/logo-mark-dark.svg" : "/assets/logo-mark-light.svg";
 }
 
 function updateChartThemes() {
@@ -570,10 +704,15 @@ function destroyHistoryCharts() {
 
 function renderTable() {
   hideStatePopover();
-  const miners = [...state.miners].sort(sortMiner);
-  $("selectionCount").textContent = `${state.selected.size} selected`;
-  $("selectAll").checked = miners.length > 0 && miners.every((miner) => state.selected.has(miner.ip));
-  $("minerRows").innerHTML = miners.map((miner) => `
+  const miners = sortedMiners();
+  clampTablePage(miners.length);
+  const pageSize = state.table.pageSize;
+  const pageCount = tablePageCount(miners.length);
+  const pageMiners = currentPageMiners(miners);
+  updateSortHeaders();
+  $("selectionCount").textContent = tableSummary(miners.length, pageMiners.length);
+  $("selectAll").checked = pageMiners.length > 0 && pageMiners.every((miner) => state.selected.has(miner.ip));
+  $("minerRows").innerHTML = pageMiners.length ? pageMiners.map((miner) => `
     <tr class="miner-row ${state.selected.has(miner.ip) ? "selected-row" : ""}" data-open-history="${escapeHtml(miner.ip)}">
       <td class="col-select"><input class="miner-select" data-ip="${miner.ip}" type="checkbox" ${state.selected.has(miner.ip) ? "checked" : ""} /></td>
       <td class="col-ip"><strong>${escapeHtml(miner.ip)}</strong></td>
@@ -587,8 +726,89 @@ function renderTable() {
       <td>${escapeHtml(getEfficiency(miner) || "-")}</td>
       <td>${escapeHtml(getFans(miner))}</td>
       <td class="col-pool">${escapeHtml(getPool(miner))}</td>
+      <td class="col-pool-user">${escapeHtml(getPoolUser(miner))}</td>
     </tr>
-  `).join("");
+  `).join("") : emptyMinerRow();
+  if (!isEditingTablePager()) renderTablePager(miners.length, pageCount);
+}
+
+function emptyMinerRow() {
+  const hasRanges = state.ranges.length > 0;
+  const hasEnabledRanges = normalizeEnabledRanges(state.enabledRanges, state.ranges).some(Boolean);
+  const title = hasEnabledRanges ? "No miners found in enabled IP ranges" : "Add IP ranges to discover miners";
+  const detail = hasRanges && !hasEnabledRanges
+    ? "Enable at least one IP range, then run a scan."
+    : "Add a range, then scan to populate this table.";
+  return `
+    <tr class="empty-row">
+      <td colspan="13">
+        <div class="table-empty">
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(detail)}</span>
+          <button class="btn btn-primary" type="button" data-open-ranges>Add IP ranges</button>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function sortedMiners() {
+  return [...state.miners].sort(sortMiner);
+}
+
+function currentPageMiners(miners = sortedMiners()) {
+  const start = miners.length ? (state.table.page - 1) * state.table.pageSize : 0;
+  return miners.slice(start, start + state.table.pageSize);
+}
+
+function tableSummary(total, visible) {
+  const selected = `${state.selected.size} selected`;
+  if (!total) return selected;
+  const start = (state.table.page - 1) * state.table.pageSize + 1;
+  const end = start + visible - 1;
+  return `${selected} · ${start}-${end} of ${total}`;
+}
+
+function renderTablePager(total, pageCount) {
+  const pager = $("minerPager");
+  if (!pager) return;
+  const page = state.table.page;
+  pager.innerHTML = `
+    <div class="pager-count">${total ? `Page ${page} of ${pageCount}` : "No miners"}</div>
+    <label class="pager-size">
+      Rows
+      <select id="minerPageSize">
+        ${[10, 25, 50, 100].map((size) => `<option value="${size}" ${state.table.pageSize === size ? "selected" : ""}>${size}</option>`).join("")}
+      </select>
+    </label>
+    <div class="pager-buttons">
+      <button class="icon-btn" data-page-step="first" aria-label="First page" title="First page" ${page <= 1 ? "disabled" : ""}>|&lt;</button>
+      <button class="icon-btn" data-page-step="previous" aria-label="Previous page" title="Previous page" ${page <= 1 ? "disabled" : ""}>&lt;</button>
+      <button class="icon-btn" data-page-step="next" aria-label="Next page" title="Next page" ${page >= pageCount ? "disabled" : ""}>&gt;</button>
+      <button class="icon-btn" data-page-step="last" aria-label="Last page" title="Last page" ${page >= pageCount ? "disabled" : ""}>&gt;|</button>
+    </div>
+  `;
+}
+
+function tablePageCount(total = state.miners.length) {
+  return Math.max(1, Math.ceil(total / state.table.pageSize));
+}
+
+function clampTablePage(total = state.miners.length) {
+  state.table.page = Math.min(Math.max(1, state.table.page), tablePageCount(total));
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll("th[data-sort]").forEach((header) => {
+    const active = header.dataset.sort === state.sort.key;
+    header.classList.toggle("sorted", active);
+    header.classList.toggle("sorted-asc", active && state.sort.direction === "asc");
+    header.classList.toggle("sorted-desc", active && state.sort.direction === "desc");
+    header.setAttribute("aria-sort", active ? (state.sort.direction === "asc" ? "ascending" : "descending") : "none");
+    header.title = active
+      ? `Sorted ${state.sort.direction === "asc" ? "ascending" : "descending"}`
+      : "Click to sort";
+  });
 }
 
 function sortMiner(a, b) {
@@ -610,6 +830,7 @@ function sortMiner(a, b) {
     tuning: [numeric(a.data?.tuning_percent), numeric(b.data?.tuning_percent)],
     fans: [getFans(a), getFans(b)],
     pool: [getPool(a), getPool(b)],
+    pool_user: [getPoolUser(a), getPoolUser(b)],
     state: [minerState(a).order, minerState(b).order],
   }[key] || [a.ip, b.ip];
   const result = values[0] > values[1] ? 1 : values[0] < values[1] ? -1 : 0;
@@ -1183,6 +1404,7 @@ document.addEventListener("click", async (event) => {
   const button = target.closest("button");
   const sortableHeader = target.closest("th[data-sort]");
   if (button?.matches(".nav")) showPage(button.dataset.page);
+  if (button?.matches("[data-open-ranges]")) showPage("ranges");
   if (button?.id === "backToMiners") showPage("miners");
   if (button?.id === "openMinerWeb" && state.history.ip) window.open(`http://${state.history.ip}`, "_blank", "noopener,noreferrer");
   if (button?.id === "liveScanToggle") {
@@ -1211,7 +1433,11 @@ document.addEventListener("click", async (event) => {
     const range = input.value.trim();
     if (!range) return;
     const previous = [...state.ranges];
+    const previousEnabled = [...state.enabledRanges];
+    const previousHosts = [...state.rangeHosts];
     state.ranges.push(range);
+    state.enabledRanges.push(true);
+    state.rangeHosts.push(0);
     renderRanges();
     try {
       await persistRanges("Range added");
@@ -1219,18 +1445,26 @@ document.addEventListener("click", async (event) => {
       $("rangePreview").textContent = "";
     } catch (error) {
       state.ranges = previous;
+      state.enabledRanges = previousEnabled;
+      state.rangeHosts = previousHosts;
       renderRanges();
       toast(error.message);
     }
   }
   if (button?.dataset.removeRange !== undefined) {
     const previous = [...state.ranges];
+    const previousEnabled = [...state.enabledRanges];
+    const previousHosts = [...state.rangeHosts];
     state.ranges.splice(Number(button.dataset.removeRange), 1);
+    state.enabledRanges.splice(Number(button.dataset.removeRange), 1);
+    state.rangeHosts.splice(Number(button.dataset.removeRange), 1);
     renderRanges();
     try {
       await persistRanges("Range removed");
     } catch (error) {
       state.ranges = previous;
+      state.enabledRanges = previousEnabled;
+      state.rangeHosts = previousHosts;
       renderRanges();
       toast(error.message);
     }
@@ -1239,6 +1473,16 @@ document.addEventListener("click", async (event) => {
     const key = sortableHeader.dataset.sort;
     state.sort.direction = state.sort.key === key && state.sort.direction === "asc" ? "desc" : "asc";
     state.sort.key = key;
+    state.table.page = 1;
+    renderTable();
+  }
+  if (button?.dataset.pageStep) {
+    const pageCount = tablePageCount();
+    if (button.dataset.pageStep === "first") state.table.page = 1;
+    if (button.dataset.pageStep === "previous") state.table.page -= 1;
+    if (button.dataset.pageStep === "next") state.table.page += 1;
+    if (button.dataset.pageStep === "last") state.table.page = pageCount;
+    clampTablePage();
     renderTable();
   }
   if (button?.dataset.openAction) openActionDialog(button.dataset.openAction);
@@ -1296,12 +1540,29 @@ document.addEventListener("change", async (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement)) return;
   if (target.matches("#settings input, #settings select")) state.settingsDirty = true;
+  if (target.matches("[data-range-enabled]")) {
+    const index = Number(target.dataset.rangeEnabled);
+    const previous = [...state.enabledRanges];
+    state.enabledRanges = normalizeEnabledRanges(state.enabledRanges, state.ranges);
+    state.enabledRanges[index] = target.checked;
+    renderRanges();
+    try {
+      await persistRanges(target.checked ? "Range enabled" : "Range disabled");
+    } catch (error) {
+      state.enabledRanges = previous;
+      renderRanges();
+      toast(error.message);
+    }
+  }
+  if (target.matches("[data-range-edit]")) {
+    await editRange(Number(target.dataset.rangeEdit), target.value);
+  }
   if (target.id === "appearanceSelect") applyAppearance(target.value);
   if (target.matches("[data-mining-state-toggle]")) {
     openActionDialog(target.checked ? "resume" : "pause", "mining_state");
   }
   if (target.id === "selectAll") {
-    state.miners.forEach((miner) => target.checked ? state.selected.add(miner.ip) : state.selected.delete(miner.ip));
+    currentPageMiners().forEach((miner) => target.checked ? state.selected.add(miner.ip) : state.selected.delete(miner.ip));
     renderTable();
     renderSelectionBar();
   }
@@ -1310,6 +1571,11 @@ document.addEventListener("change", async (event) => {
     renderTable();
     renderSelectionBar();
   }
+  if (target.id === "minerPageSize") {
+    state.table.pageSize = Number(target.value) || 10;
+    state.table.page = 1;
+    renderTable();
+  }
 });
 
 document.addEventListener("input", (event) => {
@@ -1317,8 +1583,25 @@ document.addEventListener("input", (event) => {
   if (target instanceof HTMLElement && target.matches("#settings input, #settings select")) state.settingsDirty = true;
 });
 
+document.addEventListener("keydown", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || !target.matches("[data-range-edit]")) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    target.blur();
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    target.value = state.ranges[Number(target.dataset.rangeEdit)] || "";
+    target.blur();
+  }
+});
+
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
-  if ((document.documentElement.dataset.theme || "system") === "system") updateChartThemes();
+  if ((document.documentElement.dataset.theme || "system") === "system") {
+    updateFavicon("system");
+    updateChartThemes();
+  }
 });
 
 ["hashrateChart", "thermalChart"].forEach((id) => {

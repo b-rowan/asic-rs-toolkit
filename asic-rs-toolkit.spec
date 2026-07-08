@@ -3,7 +3,7 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
-datas = collect_data_files("asic_rs_toolkit", includes=["static/*"])
+datas = collect_data_files("asic_rs_toolkit", includes=["static/*", "static/assets/*"])
 hiddenimports = (
     collect_submodules("fastapi")
     + collect_submodules("uvicorn")
@@ -38,8 +38,8 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
-    disable_windowed_traceback=False,
+    console=False,
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,

@@ -4,12 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ASIC RS Toolkit</title>
+    <link id="favicon" rel="icon" href="/assets/logo-mark-light.svg" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <aside class="rail">
       <div class="brand">
-        <div class="mark">AR</div>
+        <div class="mark" aria-hidden="true">
+          <img class="logo-mark logo-mark-light" src="/assets/logo-mark-light.svg" alt="" />
+          <img class="logo-mark logo-mark-dark" src="/assets/logo-mark-dark.svg" alt="" />
+        </div>
         <div>
           <strong>ASIC RS</strong>
           <span>Toolkit</span>
@@ -49,7 +53,7 @@
             <button id="addRange" class="btn btn-primary">Add range</button>
           </div>
           <div id="rangePreview" class="preview"></div>
-          <div id="rangeList" class="chips"></div>
+          <div id="rangeList" class="range-table-wrap"></div>
         </div>
       </section>
 
@@ -76,11 +80,13 @@
                   <th class="col-efficiency" data-sort="efficiency">Efficiency</th>
                   <th class="col-fans" data-sort="fans">Fans</th>
                   <th class="col-pool" data-sort="pool">Pool</th>
+                  <th class="col-pool-user" data-sort="pool_user">Pool User</th>
                 </tr>
               </thead>
               <tbody id="minerRows"></tbody>
             </table>
           </div>
+          <div id="minerPager" class="table-pager"></div>
         </div>
       </section>
 
@@ -127,6 +133,9 @@
       </section>
 
       <section id="history" class="page">
+        <div class="history-nav">
+          <button id="backToMiners" class="btn" type="button">← Back to table</button>
+        </div>
         <div class="panel history-panel">
           <div class="panel-head">
             <div>
@@ -135,7 +144,6 @@
             </div>
             <div class="history-actions">
               <button id="openMinerWeb" class="btn" type="button">Open in web</button>
-              <button id="backToMiners" class="btn" type="button">Back to table</button>
             </div>
           </div>
           <div id="historySummary" class="metric-grid compact"></div>

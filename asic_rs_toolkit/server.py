@@ -27,7 +27,7 @@ from .miners import (
     stream_scan_expression,
     trim_history,
 )
-from .ranges import estimate_range_size, iter_ips
+from .ranges import estimate_range_size, ip_in_any_range, iter_ips
 from .storage import ToolkitStore
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -41,6 +41,7 @@ class ToolkitState:
         self.store = store or ToolkitStore()
         self.miners: dict[str, MinerRecord] = {}
         self.ranges: list[str] = []
+        self.enabled_ranges: list[bool] = []
         self.live_scanning = False
         self.live_data_updates = False
         self.scan_running = False
@@ -67,7 +68,7 @@ class ToolkitState:
             self._poll_task = asyncio.create_task(self._poll_loop(), name="miner-poller")
         async with self.lock:
             live = self.live_scanning
-            ranges = list(self.ranges)
+            ranges = self._active_ranges_unlocked()
         if live and ranges:
             await self.start_scan()
 
@@ -88,16 +89,25 @@ class ToolkitState:
             now = time.monotonic()
             return jsonable_encoder({
                 "ranges": self.ranges,
+                "enabled_ranges": self._normalized_enabled_ranges_unlocked(),
+                "range_hosts": self._range_host_counts_unlocked(),
                 "live_scanning": self.live_scanning,
                 "live_data_updates": self.live_data_updates,
                 "live_updates": self.live_scanning or self.live_data_updates,
                 "scan_running": self.scan_running,
                 "data_update_running": self.data_update_running,
-                "next_scan_in": _seconds_until(self._next_scan_at, now) if self.live_scanning and self.ranges else None,
+                "next_scan_in": (
+                    _seconds_until(self._next_scan_at, now)
+                    if self.live_scanning and self._active_ranges_unlocked()
+                    else None
+                ),
                 "next_data_update_in": _seconds_until(self._next_data_at, now) if self.live_data_updates else None,
                 "last_scan_error": self.last_scan_error,
                 "settings": self._settings_unlocked().model_dump(),
-                "miners": [record.snapshot() for record in sorted(self.miners.values(), key=lambda item: item.ip)],
+                "miners": [
+                    record.snapshot()
+                    for record in sorted(self._visible_miner_records_unlocked(), key=lambda item: item.ip)
+                ],
             })
 
     async def wait_for_status_change(self, version: int, timeout: float = 1.0) -> int:
@@ -116,17 +126,30 @@ class ToolkitState:
             self._status_version += 1
             self._status_condition.notify_all()
 
-    async def set_ranges(self, ranges: list[str]) -> dict[str, Any]:
-        cleaned = [item.strip() for item in ranges if item.strip()]
+    async def set_ranges(self, ranges: list[str], enabled_ranges: list[bool] | None = None) -> dict[str, Any]:
+        cleaned: list[str] = []
+        cleaned_enabled: list[bool] = []
+        for index, item in enumerate(ranges):
+            expression = str(item).strip()
+            if not expression:
+                continue
+            cleaned.append(expression)
+            cleaned_enabled.append(bool(enabled_ranges[index]) if enabled_ranges and index < len(enabled_ranges) else True)
         for expression in cleaned:
             estimate_range_size(expression)
         async with self.lock:
             self.ranges = cleaned
+            self.enabled_ranges = cleaned_enabled
             settings = self._settings_unlocked()
         self._wake_poll_loop()
         await self.store.save_settings(settings)
         await self._notify_status()
-        return {"ranges": cleaned, "estimated_hosts": sum(estimate_range_size(item) for item in cleaned)}
+        return {
+            "ranges": cleaned,
+            "enabled_ranges": cleaned_enabled,
+            "range_hosts": self._range_host_counts(cleaned),
+            "estimated_hosts": sum(estimate_range_size(item) for item in self._active_ranges(cleaned, cleaned_enabled)),
+        }
 
     async def toggle_live(
         self,
@@ -175,7 +198,7 @@ class ToolkitState:
         async with self.lock:
             if self.scan_running:
                 return
-            ranges = list(self.ranges)
+            ranges = self._active_ranges_unlocked()
             self.scan_running = True
             self.last_scan_error = None
             self._scan_task = asyncio.create_task(self._run_started_scan(ranges), name="miner-scan")
@@ -394,7 +417,7 @@ class ToolkitState:
                     live_data_updates = self.live_data_updates
                     scan_interval = self.scan_interval
                     data_update_interval = self.data_update_interval
-                    ranges = list(self.ranges)
+                    ranges = self._active_ranges_unlocked()
                     records = list(self.miners.values())
                 now = time.monotonic()
                 if scan_interval != previous_scan_interval:
@@ -500,6 +523,7 @@ class ToolkitState:
         miners = await self.store.load_miners()
         async with self.lock:
             self.ranges = settings.ranges
+            self.enabled_ranges = self._normalized_enabled_ranges(settings.ranges, settings.enabled_ranges)
             self.live_scanning = settings.live_scanning
             self.live_data_updates = settings.live_data_updates
             self.scan_interval = settings.scan_interval
@@ -526,6 +550,7 @@ class ToolkitState:
     def _settings_unlocked(self) -> AppSettings:
         return AppSettings(
             ranges=list(self.ranges),
+            enabled_ranges=self._normalized_enabled_ranges_unlocked(),
             live_scanning=self.live_scanning,
             live_data_updates=self.live_data_updates,
             scan_interval=self.scan_interval,
@@ -536,6 +561,40 @@ class ToolkitState:
 
     def _wake_poll_loop(self) -> None:
         self._poll_wakeup.set()
+
+    def _active_ranges_unlocked(self) -> list[str]:
+        return self._active_ranges(self.ranges, self.enabled_ranges)
+
+    def _normalized_enabled_ranges_unlocked(self) -> list[bool]:
+        return self._normalized_enabled_ranges(self.ranges, self.enabled_ranges)
+
+    def _range_host_counts_unlocked(self) -> list[int]:
+        return self._range_host_counts(self.ranges)
+
+    def _visible_miner_records_unlocked(self) -> list[MinerRecord]:
+        if not self.ranges:
+            return list(self.miners.values())
+        active_ranges = self._active_ranges_unlocked()
+        return [
+            record for record in self.miners.values()
+            if active_ranges and ip_in_any_range(record.ip, active_ranges)
+        ]
+
+    @staticmethod
+    def _active_ranges(ranges: list[str], enabled_ranges: list[bool]) -> list[str]:
+        enabled = ToolkitState._normalized_enabled_ranges(ranges, enabled_ranges)
+        return [expression for expression, is_enabled in zip(ranges, enabled, strict=False) if is_enabled]
+
+    @staticmethod
+    def _normalized_enabled_ranges(ranges: list[str], enabled_ranges: list[bool]) -> list[bool]:
+        return [
+            bool(enabled_ranges[index]) if index < len(enabled_ranges) else True
+            for index, _ in enumerate(ranges)
+        ]
+
+    @staticmethod
+    def _range_host_counts(ranges: list[str]) -> list[int]:
+        return [estimate_range_size(expression) for expression in ranges]
 
 
 class StaticChangeTracker:
@@ -585,7 +644,7 @@ def create_app(state: ToolkitState | None = None) -> FastAPI:
     async def set_ranges(request: Request) -> dict[str, Any]:
         payload = await request.json()
         try:
-            return await app.state.toolkit.set_ranges(payload.get("ranges", []))
+            return await app.state.toolkit.set_ranges(payload.get("ranges", []), payload.get("enabled_ranges"))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

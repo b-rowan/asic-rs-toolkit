@@ -32,6 +32,7 @@ SUPPORT_FLAGS = (
 
 class AppSettings(BaseModel):
     ranges: list[str] = Field(default_factory=list)
+    enabled_ranges: list[bool] = Field(default_factory=list)
     live_scanning: bool = False
     live_data_updates: bool = False
     scan_interval: int = 30
