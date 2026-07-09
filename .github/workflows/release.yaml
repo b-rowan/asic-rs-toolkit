@@ -119,11 +119,11 @@ jobs:
           - os: ubuntu-latest
             artifact_name: linux
             artifact_path: dist/asic-rs-toolkit
-            archive_name: asic-rs-toolkit-linux.tar.gz
+            release_name: asic-rs-toolkit-linux
           - os: windows-latest
             artifact_name: windows
             artifact_path: dist/asic-rs-toolkit.exe
-            archive_name: asic-rs-toolkit-windows.zip
+            release_name: asic-rs-toolkit-windows.exe
 
     steps:
       - name: Checkout release tag
@@ -145,25 +145,25 @@ jobs:
       - name: Build with PyInstaller
         run: uv run pyinstaller asic-rs-toolkit.spec
 
-      - name: Archive Linux executable
+      - name: Prepare release executable
         if: runner.os == 'Linux'
         run: |
           mkdir -p release-artifacts
           chmod +x "${{ matrix.artifact_path }}"
-          tar -czf "release-artifacts/${{ matrix.archive_name }}" -C dist asic-rs-toolkit
+          cp "${{ matrix.artifact_path }}" "release-artifacts/${{ matrix.release_name }}"
 
-      - name: Archive Windows executable
+      - name: Prepare release executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release-artifacts | Out-Null
-          Compress-Archive -Path "${{ matrix.artifact_path }}" -DestinationPath "release-artifacts/${{ matrix.archive_name }}" -Force
+          Copy-Item -Path "${{ matrix.artifact_path }}" -Destination "release-artifacts/${{ matrix.release_name }}" -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
           name: asic-rs-toolkit-${{ matrix.artifact_name }}
-          path: release-artifacts/${{ matrix.archive_name }}
+          path: release-artifacts/${{ matrix.release_name }}
           if-no-files-found: error
 
   release:
