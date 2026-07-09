@@ -712,33 +712,80 @@ function destroyHistoryCharts() {
 }
 
 function renderTable() {
-  hideStatePopover();
   const miners = sortedMiners();
   clampTablePage(miners.length);
   const pageSize = state.table.pageSize;
   const pageCount = tablePageCount(miners.length);
   const pageMiners = currentPageMiners(miners);
+  const tbody = $("minerRows");
+  const activeStatusIp = state.activeStatePopover?.wrapper.closest("tr[data-open-history]")?.dataset.openHistory || null;
   updateSortHeaders();
   $("selectionCount").textContent = tableSummary(miners.length, pageMiners.length);
   $("selectAll").checked = pageMiners.length > 0 && pageMiners.every((miner) => state.selected.has(miner.ip));
-  $("minerRows").innerHTML = pageMiners.length ? pageMiners.map((miner) => `
-    <tr class="miner-row ${state.selected.has(miner.ip) ? "selected-row" : ""}" data-open-history="${escapeHtml(miner.ip)}">
-      <td class="col-select"><input class="miner-select" data-ip="${miner.ip}" type="checkbox" ${state.selected.has(miner.ip) ? "checked" : ""} /></td>
-      <td class="col-ip"><strong>${escapeHtml(miner.ip)}</strong></td>
-      <td class="col-state">${statusBadge(miner)}</td>
-      <td class="col-make">${escapeHtml(getMake(miner))}</td>
-      <td class="col-model">${escapeHtml(getModel(miner))}</td>
-      <td class="col-firmware">${escapeHtml(getFirmware(miner))}</td>
-      <td>${escapeHtml(getHashratePair(miner) || "-")}</td>
-      <td>${escapeHtml(number(miner.data?.wattage) || "-")}</td>
-      <td>${escapeHtml(number(miner.data?.average_temperature) || "-")}</td>
-      <td>${escapeHtml(getEfficiency(miner) || "-")}</td>
-      <td>${escapeHtml(getFans(miner))}</td>
-      <td class="col-pool">${escapeHtml(getPool(miner))}</td>
-      <td class="col-pool-user">${escapeHtml(getPoolUser(miner))}</td>
-    </tr>
-  `).join("") : emptyMinerRow();
+  if (pageMiners.length) {
+    renderMinerRows(tbody, pageMiners, activeStatusIp);
+  } else {
+    hideStatePopover();
+    tbody.dataset.pageIps = "";
+    tbody.innerHTML = emptyMinerRow();
+  }
+  if (state.activeStatePopover?.wrapper.isConnected) {
+    positionStatePopover(state.activeStatePopover.wrapper, state.activeStatePopover.popover);
+  } else if (state.activeStatePopover) {
+    hideStatePopover();
+  }
   if (!isEditingTablePager()) renderTablePager(miners.length, pageCount);
+}
+
+function renderMinerRows(tbody, pageMiners, activeStatusIp) {
+  const pageIps = pageMiners.map((miner) => miner.ip).join("\u001f");
+  if (tbody.dataset.pageIps !== pageIps) {
+    if (!activeStatusIp || !pageMiners.some((miner) => miner.ip === activeStatusIp)) hideStatePopover();
+    tbody.dataset.pageIps = pageIps;
+    tbody.innerHTML = pageMiners.map((miner) => minerRowHtml(miner)).join("");
+    Array.from(tbody.querySelectorAll("tr[data-open-history]")).forEach((row) => {
+      row.dataset.renderHash = minerRowHtml(pageMiners.find((miner) => miner.ip === row.dataset.openHistory));
+    });
+    return;
+  }
+
+  Array.from(tbody.querySelectorAll("tr[data-open-history]")).forEach((row, index) => {
+    const miner = pageMiners[index];
+    if (!miner) return;
+    const html = minerRowHtml(miner);
+    row.classList.toggle("selected-row", state.selected.has(miner.ip));
+    if (miner.ip === activeStatusIp) return;
+    if (row.dataset.renderHash !== html) {
+      row.innerHTML = minerRowCellsHtml(miner);
+      row.dataset.renderHash = html;
+    }
+  });
+}
+
+function minerRowHtml(miner) {
+  return `
+    <tr class="miner-row ${state.selected.has(miner.ip) ? "selected-row" : ""}" data-open-history="${escapeHtml(miner.ip)}">
+      ${minerRowCellsHtml(miner)}
+    </tr>
+  `;
+}
+
+function minerRowCellsHtml(miner) {
+  return `
+    <td class="col-select"><input class="miner-select" data-ip="${miner.ip}" type="checkbox" ${state.selected.has(miner.ip) ? "checked" : ""} /></td>
+    <td class="col-ip"><strong>${escapeHtml(miner.ip)}</strong></td>
+    <td class="col-state">${statusBadge(miner)}</td>
+    <td class="col-make">${escapeHtml(getMake(miner))}</td>
+    <td class="col-model">${escapeHtml(getModel(miner))}</td>
+    <td class="col-firmware">${escapeHtml(getFirmware(miner))}</td>
+    <td>${escapeHtml(getHashratePair(miner) || "-")}</td>
+    <td>${escapeHtml(number(miner.data?.wattage) || "-")}</td>
+    <td>${escapeHtml(number(miner.data?.average_temperature) || "-")}</td>
+    <td>${escapeHtml(getEfficiency(miner) || "-")}</td>
+    <td>${escapeHtml(getFans(miner))}</td>
+    <td class="col-pool">${escapeHtml(getPool(miner))}</td>
+    <td class="col-pool-user">${escapeHtml(getPoolUser(miner))}</td>
+  `;
 }
 
 function emptyMinerRow() {
