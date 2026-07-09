@@ -7,12 +7,13 @@ from pathlib import Path
 from .server import ManagedToolkitServer
 
 APP_ICON = Path(__file__).with_name("static") / "assets" / "logo-mark-light.svg"
+WINDOWS_APP_ICON = Path(__file__).with_name("static") / "assets" / "app-icon.ico"
 
 
 def _window_icon() -> str | None:
+    if sys.platform == "win32" and WINDOWS_APP_ICON.exists():
+        return str(WINDOWS_APP_ICON)
     if not APP_ICON.exists():
-        return None
-    if sys.platform == "win32" and APP_ICON.suffix.lower() == ".svg":
         return None
     return str(APP_ICON)
 
