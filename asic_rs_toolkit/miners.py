@@ -78,7 +78,7 @@ class MinerRecord(BaseModel):
 
 def factory_for_expression(expression: str) -> MinerFactory:
     octets = parse_range_expression(expression)
-    return MinerFactory.from_octets(*(octet.as_pyasic_arg() for octet in octets))
+    return MinerFactory.from_octets(*(octet.as_pyasic_arg() for octet in octets)).with_concurrent_limit(1000)
 
 
 async def stream_scan_expression(expression: str) -> AsyncIterator[Miner]:
