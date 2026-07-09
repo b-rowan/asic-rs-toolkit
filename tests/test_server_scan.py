@@ -17,14 +17,14 @@ class FakeMiner:
         self.supports_restart = True
 
 
-async def fake_stream_scan(expression: str):
+async def fake_stream_scan(expression: str, concurrency_limit: int = 1000):
     await asyncio.sleep(0)
     yield FakeMiner("10.0.0.2")
     await asyncio.sleep(0)
     yield FakeMiner("10.0.0.3")
 
 
-async def fake_expression_miner_stream(expression: str):
+async def fake_expression_miner_stream(expression: str, concurrency_limit: int = 1000):
     await asyncio.sleep(0)
     yield FakeMiner({
         "10.0.0.1": "10.0.0.2",
@@ -114,6 +114,37 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
             self.assertEqual(status["enabled_ranges"], [False, True])
             self.assertEqual(status["range_hosts"], [1, 2])
             self.assertEqual([miner["ip"] for miner in status["miners"]], ["10.0.1.2"])
+
+    async def test_scan_uses_configured_concurrency_limit(self) -> None:
+        seen_limits: list[int] = []
+
+        async def fake_limited_stream(expression: str, concurrency_limit: int = 1000):
+            seen_limits.append(concurrency_limit)
+            await asyncio.sleep(0)
+            yield FakeMiner("10.0.0.2")
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = ToolkitState(ToolkitStore(Path(directory) / "toolkit.sqlite3"))
+            await state.start()
+            await state.set_ranges(["10.0.0.1-2"])
+            await state.update_settings({"scan_concurrency_limit": 7})
+
+            with (
+                patch("asic_rs_toolkit.server.stream_scan_expression", fake_limited_stream),
+                patch("asic_rs_toolkit.server.collect_data", fake_collect_data),
+            ):
+                await state.start_scan()
+                for _ in range(50):
+                    status = await state.status()
+                    if not status["scan_running"]:
+                        break
+                    await asyncio.sleep(0.01)
+
+            status = await state.status()
+            await state.stop()
+
+            self.assertEqual(status["settings"]["scan_concurrency_limit"], 7)
+            self.assertEqual(seen_limits, [7])
 
     async def test_status_serializes_timedelta_miner_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

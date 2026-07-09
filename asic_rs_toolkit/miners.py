@@ -11,6 +11,7 @@ from pyasic_rs import FanConfig, Miner, MinerFactory, Pool, PoolGroup, ScalingCo
 from .ranges import parse_range_expression
 
 HISTORY_SECONDS = 30 * 60
+DEFAULT_SCAN_CONCURRENCY_LIMIT = 1000
 SUPPORT_FLAGS = (
     "supports_restart",
     "supports_pause",
@@ -36,6 +37,7 @@ class AppSettings(BaseModel):
     live_scanning: bool = False
     live_data_updates: bool = False
     scan_interval: int = 30
+    scan_concurrency_limit: int = Field(default=DEFAULT_SCAN_CONCURRENCY_LIMIT, ge=1)
     data_update_interval: int = 30
     auto_clear_offline: bool = False
     appearance: Literal["system", "light", "dark"] = "system"
@@ -76,13 +78,19 @@ class MinerRecord(BaseModel):
         }
 
 
-def factory_for_expression(expression: str) -> MinerFactory:
+def factory_for_expression(
+    expression: str,
+    concurrency_limit: int = DEFAULT_SCAN_CONCURRENCY_LIMIT,
+) -> MinerFactory:
     octets = parse_range_expression(expression)
-    return MinerFactory.from_octets(*(octet.as_pyasic_arg() for octet in octets)).with_concurrent_limit(1000)
+    return MinerFactory.from_octets(*(octet.as_pyasic_arg() for octet in octets)).with_concurrent_limit(concurrency_limit)
 
 
-async def stream_scan_expression(expression: str) -> AsyncIterator[Miner]:
-    async for miner in factory_for_expression(expression).scan_stream():
+async def stream_scan_expression(
+    expression: str,
+    concurrency_limit: int = DEFAULT_SCAN_CONCURRENCY_LIMIT,
+) -> AsyncIterator[Miner]:
+    async for miner in factory_for_expression(expression, concurrency_limit).scan_stream():
         yield miner
 
 

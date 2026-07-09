@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 
 from .miners import (
     AppSettings,
+    DEFAULT_SCAN_CONCURRENCY_LIMIT,
     HistoryPoint,
     MinerRecord,
     apply_action,
@@ -48,6 +49,7 @@ class ToolkitState:
         self.data_update_running = False
         self.last_scan_error: str | None = None
         self.scan_interval = 30
+        self.scan_concurrency_limit = DEFAULT_SCAN_CONCURRENCY_LIMIT
         self.data_update_interval = 30
         self.auto_clear_offline = False
         self.appearance = "system"
@@ -180,6 +182,8 @@ class ToolkitState:
         async with self.lock:
             if "scan_interval" in payload:
                 self.scan_interval = _coerce_interval(payload["scan_interval"], "scan_interval")
+            if "scan_concurrency_limit" in payload:
+                self.scan_concurrency_limit = _coerce_scan_concurrency_limit(payload["scan_concurrency_limit"])
             if "data_update_interval" in payload:
                 self.data_update_interval = _coerce_interval(payload["data_update_interval"], "data_update_interval")
             if "auto_clear_offline" in payload:
@@ -199,9 +203,13 @@ class ToolkitState:
             if self.scan_running:
                 return
             ranges = self._active_ranges_unlocked()
+            concurrency_limit = self.scan_concurrency_limit
             self.scan_running = True
             self.last_scan_error = None
-            self._scan_task = asyncio.create_task(self._run_started_scan(ranges), name="miner-scan")
+            self._scan_task = asyncio.create_task(
+                self._run_started_scan(ranges, concurrency_limit),
+                name="miner-scan",
+            )
         await self._notify_status()
 
     async def refresh_miners(self, ips: list[str]) -> dict[str, Any]:
@@ -303,11 +311,14 @@ class ToolkitState:
                 self.miners[ip] = record
             return record
 
-    async def _scan_worker(self, ranges: list[str]) -> None:
+    async def _scan_worker(self, ranges: list[str], concurrency_limit: int) -> None:
         sentinel = object()
         queue: asyncio.Queue[Any] = asyncio.Queue()
         tasks = [
-            asyncio.create_task(self._enqueue_scan_results(expression, queue, sentinel), name=f"miner-scan-range-{index}")
+            asyncio.create_task(
+                self._enqueue_scan_results(expression, concurrency_limit, queue, sentinel),
+                name=f"miner-scan-range-{index}",
+            )
             for index, expression in enumerate(ranges)
         ]
         try:
@@ -346,7 +357,7 @@ class ToolkitState:
                 self.scan_running = False
             await self._notify_status()
 
-    async def _run_scan(self, ranges: list[str]) -> bool:
+    async def _run_scan(self, ranges: list[str], concurrency_limit: int) -> bool:
         current_task = asyncio.current_task()
         async with self.lock:
             if self.scan_running:
@@ -365,25 +376,31 @@ class ToolkitState:
 
         await self._notify_status()
         try:
-            await self._scan_worker(ranges)
+            await self._scan_worker(ranges, concurrency_limit)
             return True
         finally:
             async with self.lock:
                 if self._scan_task is current_task:
                     self._scan_task = None
 
-    async def _run_started_scan(self, ranges: list[str]) -> None:
+    async def _run_started_scan(self, ranges: list[str], concurrency_limit: int) -> None:
         current_task = asyncio.current_task()
         try:
-            await self._scan_worker(ranges)
+            await self._scan_worker(ranges, concurrency_limit)
         finally:
             async with self.lock:
                 if self._scan_task is current_task:
                     self._scan_task = None
 
-    async def _enqueue_scan_results(self, expression: str, queue: asyncio.Queue[Any], sentinel: object) -> None:
+    async def _enqueue_scan_results(
+        self,
+        expression: str,
+        concurrency_limit: int,
+        queue: asyncio.Queue[Any],
+        sentinel: object,
+    ) -> None:
         try:
-            async for miner in stream_scan_expression(expression):
+            async for miner in stream_scan_expression(expression, concurrency_limit):
                 await queue.put(miner)
         except Exception as exc:
             await queue.put(exc)
@@ -416,6 +433,7 @@ class ToolkitState:
                     live_scanning = self.live_scanning
                     live_data_updates = self.live_data_updates
                     scan_interval = self.scan_interval
+                    scan_concurrency_limit = self.scan_concurrency_limit
                     data_update_interval = self.data_update_interval
                     ranges = self._active_ranges_unlocked()
                     records = list(self.miners.values())
@@ -427,7 +445,7 @@ class ToolkitState:
                     next_data_at = now + data_update_interval
                     previous_data_update_interval = data_update_interval
                 if live_scanning and ranges and now >= next_scan_at:
-                    await self._run_scan(ranges)
+                    await self._run_scan(ranges, scan_concurrency_limit)
                     next_scan_at = time.monotonic() + scan_interval
                 elif not live_scanning or not ranges:
                     next_scan_at = now + scan_interval
@@ -527,6 +545,7 @@ class ToolkitState:
             self.live_scanning = settings.live_scanning
             self.live_data_updates = settings.live_data_updates
             self.scan_interval = settings.scan_interval
+            self.scan_concurrency_limit = settings.scan_concurrency_limit
             self.data_update_interval = settings.data_update_interval
             self.auto_clear_offline = settings.auto_clear_offline
             self.appearance = settings.appearance
@@ -554,6 +573,7 @@ class ToolkitState:
             live_scanning=self.live_scanning,
             live_data_updates=self.live_data_updates,
             scan_interval=self.scan_interval,
+            scan_concurrency_limit=self.scan_concurrency_limit,
             data_update_interval=self.data_update_interval,
             auto_clear_offline=self.auto_clear_offline,
             appearance=self.appearance,
@@ -825,6 +845,13 @@ def _coerce_interval(value: Any, name: str) -> int:
     if interval < 5:
         raise ValueError(f"{name} must be at least 5 seconds")
     return interval
+
+
+def _coerce_scan_concurrency_limit(value: Any) -> int:
+    limit = int(value)
+    if limit < 1:
+        raise ValueError("scan_concurrency_limit must be at least 1")
+    return limit
 
 
 def _coerce_appearance(value: Any) -> str:

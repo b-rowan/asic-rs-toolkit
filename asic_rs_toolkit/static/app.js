@@ -13,7 +13,13 @@ const state = {
   chartHovering: {},
   chartPending: {},
   activeStatePopover: null,
-  settings: { scan_interval: 30, data_update_interval: 30, auto_clear_offline: false, appearance: "system" },
+  settings: {
+    scan_interval: 30,
+    scan_concurrency_limit: 1000,
+    data_update_interval: 30,
+    auto_clear_offline: false,
+    appearance: "system",
+  },
   settingsDirty: false,
   rangesPending: false,
   rangePreviewRequest: 0,
@@ -651,6 +657,7 @@ async function editRange(index, value) {
 function renderSettings(force = false) {
   if (state.settingsDirty && !force) return;
   $("scanIntervalInput").value = state.settings.scan_interval ?? 30;
+  $("scanConcurrencyLimitInput").value = state.settings.scan_concurrency_limit ?? 1000;
   $("dataUpdateIntervalInput").value = state.settings.data_update_interval ?? 30;
   $("autoClearOfflineToggle").checked = !!state.settings.auto_clear_offline;
   $("appearanceSelect").value = state.settings.appearance || "system";
@@ -659,9 +666,11 @@ function renderSettings(force = false) {
 
 async function saveSettings() {
   const scanInterval = Number($("scanIntervalInput").value);
+  const scanConcurrencyLimit = Number($("scanConcurrencyLimitInput").value);
   const dataUpdateInterval = Number($("dataUpdateIntervalInput").value);
   const payload = {
     scan_interval: scanInterval,
+    scan_concurrency_limit: scanConcurrencyLimit,
     data_update_interval: dataUpdateInterval,
     auto_clear_offline: $("autoClearOfflineToggle").checked,
     appearance: $("appearanceSelect").value,

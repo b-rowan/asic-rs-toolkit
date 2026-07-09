@@ -35,6 +35,7 @@ class ToolkitStoreTests(IsolatedAsyncioTestCase):
                     live_scanning=True,
                     live_data_updates=True,
                     scan_interval=15,
+                    scan_concurrency_limit=42,
                     data_update_interval=20,
                     auto_clear_offline=True,
                     appearance="dark",
@@ -61,6 +62,7 @@ class ToolkitStoreTests(IsolatedAsyncioTestCase):
             self.assertTrue(settings.live_scanning)
             self.assertTrue(settings.live_data_updates)
             self.assertEqual(settings.scan_interval, 15)
+            self.assertEqual(settings.scan_concurrency_limit, 42)
             self.assertEqual(settings.data_update_interval, 20)
             self.assertTrue(settings.auto_clear_offline)
             self.assertEqual(settings.appearance, "dark")
