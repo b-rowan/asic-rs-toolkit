@@ -264,12 +264,12 @@ function minerState(miner) {
   if (miner.error) return { label: "Offline", className: "offline", order: 0 };
   const hasData = miner.data && Object.keys(miner.data).length > 0;
   if (!hasData || !miner.last_seen) return { label: "Offline", className: "offline", order: 0 };
+  if (miner.data?.is_mining === false) return { label: "Paused", className: "paused", order: 1 };
   const errors = minerErrors(miner);
-  if (errors) return { label: `${errors} issue${errors === 1 ? "" : "s"}`, className: "err", order: 1 };
+  if (errors) return { label: `${errors} issue${errors === 1 ? "" : "s"}`, className: "err", order: 2 };
   const warnings = (miner.data?.messages || []).filter((message) => message.severity === "Warning").length;
-  if (warnings) return { label: `${warnings} warning${warnings === 1 ? "" : "s"}`, className: "warn", order: 2 };
+  if (warnings) return { label: `${warnings} warning${warnings === 1 ? "" : "s"}`, className: "warn", order: 3 };
   if (miner.data?.is_mining === true) return { label: "Mining", className: "ok", order: 4 };
-  if (miner.data?.is_mining === false) return { label: "Paused", className: "paused", order: 3 };
   return { label: "Unknown", className: "", order: 1 };
 }
 
