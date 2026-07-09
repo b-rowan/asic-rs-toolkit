@@ -58,20 +58,32 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import os
-          import re
+          import tomllib
 
           path = Path("pyproject.toml")
           version = os.environ["VERSION"]
           text = path.read_text()
-          updated = re.sub(
-              r'(?ms)^(\[project\]\s+.*?^version = ")[^"]+(")',
-              rf"\g<1>{version}\2",
-              text,
-              count=1,
-          )
-          if updated == text:
-              raise SystemExit("Could not update [project].version in pyproject.toml")
-          path.write_text(updated)
+          current = tomllib.loads(text)["project"]["version"]
+          if current == version:
+              print(f"pyproject.toml already has version {version}")
+              raise SystemExit(0)
+
+          lines = text.splitlines(keepends=True)
+          in_project = False
+          for index, line in enumerate(lines):
+              stripped = line.strip()
+              if stripped == "[project]":
+                  in_project = True
+                  continue
+              if in_project and stripped.startswith("[") and stripped.endswith("]"):
+                  break
+              if in_project and stripped.startswith("version = "):
+                  newline = "\n" if line.endswith("\n") else ""
+                  lines[index] = f'version = "{version}"{newline}'
+                  path.write_text("".join(lines))
+                  break
+          else:
+              raise SystemExit("Could not find [project].version in pyproject.toml")
           PY
 
           uv lock
@@ -83,13 +95,13 @@ jobs:
             exit 1
           fi
           if git diff --cached --quiet; then
-            echo "No version changes to commit" >&2
-            exit 1
+            echo "No version changes to commit; tagging current commit."
+          else
+            git commit -m "chore(release): prepare for ${TAG}"
+            git push origin "HEAD:${GITHUB_REF}"
           fi
 
-          git commit -m "chore(release): prepare for ${TAG}"
           git tag "$TAG"
-          git push origin "HEAD:${GITHUB_REF}"
           git push origin "$TAG"
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
