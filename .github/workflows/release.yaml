@@ -1,23 +1,104 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Tag to release, such as v0.1.0. Defaults to the current ref name."
-        required: false
+      version:
+        description: "Version to release, without leading v (for example: 0.1.0)"
+        required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  prepare-release:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
+        with:
+          enable-cache: true
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version, commit, and tag
+        id: release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must be in X.Y.Z format, got: $VERSION" >&2
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists" >&2
+            exit 1
+          fi
+
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          path = Path("pyproject.toml")
+          version = os.environ["VERSION"]
+          text = path.read_text()
+          updated = re.sub(
+              r'(?ms)^(\[project\]\s+.*?^version = ")[^"]+(")',
+              rf"\g<1>{version}\2",
+              text,
+              count=1,
+          )
+          if updated == text:
+              raise SystemExit("Could not update [project].version in pyproject.toml")
+          path.write_text(updated)
+          PY
+
+          uv lock
+
+          git add pyproject.toml uv.lock
+          if ! git diff --quiet; then
+            echo "Unstaged generated changes remain:" >&2
+            git status --short
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo "No version changes to commit" >&2
+            exit 1
+          fi
+
+          git commit -m "chore(release): prepare for ${TAG}"
+          git tag "$TAG"
+          git push origin "HEAD:${GITHUB_REF}"
+          git push origin "$TAG"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.artifact_name }}
     runs-on: ${{ matrix.os }}
+    needs: prepare-release
 
     strategy:
       fail-fast: false
@@ -33,10 +114,10 @@ jobs:
             archive_name: asic-rs-toolkit-windows.zip
 
     steps:
-      - name: Checkout repository
+      - name: Checkout release tag
         uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3
@@ -76,19 +157,13 @@ jobs:
   release:
     name: Create GitHub release
     runs-on: ubuntu-latest
-    needs: build
+    needs:
+      - prepare-release
+      - build
+    permissions:
+      contents: write
 
     steps:
-      - name: Resolve release tag
-        id: release_tag
-        run: |
-          tag="${{ inputs.tag || github.ref_name }}"
-          if [ -z "$tag" ]; then
-            echo "Release tag is required." >&2
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
       - name: Download build artifacts
         uses: actions/download-artifact@v7
         with:
@@ -98,12 +173,9 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-artifacts/* --clobber
-          else
-            gh release create "$RELEASE_TAG" release-artifacts/* \
-              --title "$RELEASE_TAG" \
-              --generate-notes
-          fi
+          gh release create "$RELEASE_TAG" release-artifacts/* \
+            --title "$RELEASE_TAG" \
+            --generate-notes
