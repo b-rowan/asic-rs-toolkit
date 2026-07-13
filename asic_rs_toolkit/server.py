@@ -25,7 +25,7 @@ from .miners import (
     collect_data,
     get_miner,
     summarize_history_point,
-    stream_scan_expression,
+    stream_scan_progress_expression,
     trim_history,
 )
 from .ranges import estimate_range_size, ip_in_any_range, iter_ips
@@ -46,6 +46,7 @@ class ToolkitState:
         self.live_scanning = False
         self.live_data_updates = False
         self.scan_running = False
+        self.scan_progress = self._empty_scan_progress()
         self.data_update_running = False
         self.last_scan_error: str | None = None
         self.scan_interval = 30
@@ -62,6 +63,17 @@ class ToolkitState:
         self._status_version = 0
         self._stopped = False
         self._loaded = False
+
+    def _empty_scan_progress(self) -> dict[str, Any]:
+        return {"total": 0, "scanned": 0, "found": 0, "current_ip": None}
+
+    def _initial_scan_progress_unlocked(self, ranges: list[str]) -> dict[str, Any]:
+        return {
+            "total": sum(estimate_range_size(expression) for expression in ranges),
+            "scanned": 0,
+            "found": 0,
+            "current_ip": None,
+        }
 
     async def start(self) -> None:
         await self._load_persisted_state()
@@ -97,6 +109,7 @@ class ToolkitState:
                 "live_data_updates": self.live_data_updates,
                 "live_updates": self.live_scanning or self.live_data_updates,
                 "scan_running": self.scan_running,
+                "scan_progress": dict(self.scan_progress),
                 "data_update_running": self.data_update_running,
                 "next_scan_in": (
                     _seconds_until(self._next_scan_at, now)
@@ -205,6 +218,7 @@ class ToolkitState:
             ranges = self._active_ranges_unlocked()
             concurrency_limit = self.scan_concurrency_limit
             self.scan_running = True
+            self.scan_progress = self._initial_scan_progress_unlocked(ranges)
             self.last_scan_error = None
             self._scan_task = asyncio.create_task(
                 self._run_started_scan(ranges, concurrency_limit),
@@ -331,8 +345,11 @@ class ToolkitState:
                 elif isinstance(item, Exception):
                     errors.append(str(item))
                 else:
-                    record = await self._record_found_miner(item)
-                    await self._poll_records([record])
+                    ip, miner = item
+                    await self._record_scanned_ip(ip, miner)
+                    if miner is not None:
+                        record = await self._record_found_miner(miner)
+                        await self._poll_records([record])
             if errors:
                 async with self.lock:
                     self.last_scan_error = "; ".join(errors)
@@ -365,6 +382,7 @@ class ToolkitState:
             else:
                 running_task = None
                 self.scan_running = True
+                self.scan_progress = self._initial_scan_progress_unlocked(ranges)
                 self.last_scan_error = None
                 if current_task is not None:
                     self._scan_task = current_task
@@ -400,8 +418,8 @@ class ToolkitState:
         sentinel: object,
     ) -> None:
         try:
-            async for miner in stream_scan_expression(expression, concurrency_limit):
-                await queue.put(miner)
+            async for ip, miner in stream_scan_progress_expression(expression, concurrency_limit):
+                await queue.put((ip, miner))
         except Exception as exc:
             await queue.put(exc)
         finally:
@@ -417,6 +435,17 @@ class ToolkitState:
         await self.store.save_miner(record)
         await self._notify_status()
         return record
+
+    async def _record_scanned_ip(self, ip: str, miner: Any | None) -> None:
+        async with self.lock:
+            self.scan_progress["scanned"] = min(
+                self.scan_progress["total"],
+                self.scan_progress["scanned"] + 1,
+            )
+            if miner is not None:
+                self.scan_progress["found"] += 1
+            self.scan_progress["current_ip"] = ip
+        await self._notify_status()
 
     async def _poll_loop(self) -> None:
         try:

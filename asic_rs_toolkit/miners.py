@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pyasic_rs import FanConfig, Miner, MinerFactory, Pool, PoolGroup, ScalingConfig, TuningConfig
+from pyasic_rs.data import DataField
 
 from .ranges import parse_range_expression
 
@@ -94,12 +95,20 @@ async def stream_scan_expression(
         yield miner
 
 
+async def stream_scan_progress_expression(
+    expression: str,
+    concurrency_limit: int = DEFAULT_SCAN_CONCURRENCY_LIMIT,
+) -> AsyncIterator[tuple[str, Miner | None]]:
+    async for ip, miner in factory_for_expression(expression, concurrency_limit).scan_stream_with_ip():
+        yield str(ip), miner
+
+
 async def get_miner(ip: str) -> Miner | None:
     return await MinerFactory().get_miner(ip)
 
 
 async def collect_data(miner: Miner) -> tuple[dict[str, Any], dict[str, bool]]:
-    data_obj = await miner.get_data()
+    data_obj = await miner.get_data(exclude=[DataField.Chips])
     if hasattr(data_obj, "model_dump"):
         data = data_obj.model_dump()
     elif isinstance(data_obj, dict):

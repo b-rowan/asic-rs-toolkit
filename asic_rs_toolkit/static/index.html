@@ -33,6 +33,13 @@
           <p id="pageSubtitle">Local pyasic-rs scanner and management console.</p>
         </div>
         <div class="top-actions">
+          <div id="scanProgress" class="scan-progress" hidden>
+            <span id="scanProgressCount">0 / 0</span>
+            <div class="scan-progress-track" aria-hidden="true">
+              <span id="scanProgressFill"></span>
+            </div>
+            <small id="scanProgressDetail">0 found</small>
+          </div>
           <button id="liveScanToggle" class="schedule-toggle" type="button" aria-pressed="false">Scan off</button>
           <button id="liveDataToggle" class="schedule-toggle" type="button" aria-pressed="false">Data off</button>
           <button id="scanNow" class="btn btn-primary">Scan now</button>
@@ -150,7 +157,12 @@
               <button id="openMinerWeb" class="btn" type="button">Open in web</button>
             </div>
           </div>
-          <div id="historySummary" class="metric-grid compact"></div>
+          <section class="detail-section important-summary-section">
+            <div class="section-head">
+              <h3>Overview</h3>
+            </div>
+            <div id="historySummary" class="important-summary-grid"></div>
+          </section>
           <div class="chart-grid">
             <div class="chart-card">
               <h3>Hashrate and °C</h3>
@@ -160,6 +172,62 @@
               <h3>Watts</h3>
               <div id="thermalChart" class="history-chart"></div>
             </div>
+          </div>
+          <div class="miner-page-grid">
+            <section class="detail-section">
+              <div class="section-head">
+                <h3>Device</h3>
+              </div>
+              <div id="minerDeviceDetails" class="detail-grid"></div>
+            </section>
+            <section class="detail-section wide">
+              <div class="section-head">
+                <h3>Boards</h3>
+              </div>
+              <div id="minerBoards" class="hardware-grid boards"></div>
+            </section>
+            <section class="detail-section wide">
+              <div class="section-head">
+                <h3>Fans</h3>
+              </div>
+              <div id="minerFans" class="hardware-grid fan-grid"></div>
+            </section>
+            <section class="detail-section">
+              <div class="section-head">
+                <h3>Pools</h3>
+              </div>
+              <div id="minerPools" class="detail-list"></div>
+            </section>
+            <section class="detail-section wide">
+              <div class="section-head">
+                <h3>Messages</h3>
+              </div>
+              <div id="minerMessages" class="detail-list"></div>
+            </section>
+            <section class="detail-section">
+              <div class="section-head">
+                <h3>Mining</h3>
+              </div>
+              <div id="minerMiningDetails" class="detail-grid"></div>
+            </section>
+            <section class="detail-section">
+              <div class="section-head">
+                <h3>Thermal and Power</h3>
+              </div>
+              <div id="minerThermalDetails" class="detail-grid"></div>
+            </section>
+            <section class="detail-section">
+              <div class="section-head">
+                <h3>Network</h3>
+              </div>
+              <div id="minerNetworkDetails" class="detail-grid"></div>
+            </section>
+            <section class="detail-section">
+              <div class="section-head">
+                <h3>Firmware</h3>
+              </div>
+              <div id="minerFirmwareDetails" class="detail-grid"></div>
+            </section>
           </div>
         </div>
       </section>
@@ -172,6 +240,14 @@
       </div>
       <div id="selectionActions" class="selection-actions"></div>
       <button id="clearSelection" class="btn">Clear</button>
+    </div>
+
+    <div id="minerActionBar" class="selection-bar miner-action-bar" hidden>
+      <div class="selection-summary">
+        <strong>Miner actions</strong>
+        <span>Apply a supported action to this miner.</span>
+      </div>
+      <div id="historyActionGroups" class="selection-actions"></div>
     </div>
 
     <dialog id="actionDialog" class="action-dialog">

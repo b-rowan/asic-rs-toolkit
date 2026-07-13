@@ -19,17 +19,20 @@ class FakeMiner:
 
 async def fake_stream_scan(expression: str, concurrency_limit: int = 1000):
     await asyncio.sleep(0)
-    yield FakeMiner("10.0.0.2")
+    yield "10.0.0.1", None
     await asyncio.sleep(0)
-    yield FakeMiner("10.0.0.3")
+    yield "10.0.0.2", FakeMiner("10.0.0.2")
+    await asyncio.sleep(0)
+    yield "10.0.0.3", FakeMiner("10.0.0.3")
 
 
 async def fake_expression_miner_stream(expression: str, concurrency_limit: int = 1000):
     await asyncio.sleep(0)
-    yield FakeMiner({
+    ip = {
         "10.0.0.1": "10.0.0.2",
         "10.0.1.1-2": "10.0.1.2",
-    }[expression])
+    }[expression]
+    yield ip, FakeMiner(ip)
 
 
 async def fake_collect_data(miner: FakeMiner):
@@ -73,7 +76,7 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
             await state.set_ranges(["10.0.0.1-3"])
 
             with (
-                patch("asic_rs_toolkit.server.stream_scan_expression", fake_stream_scan),
+                patch("asic_rs_toolkit.server.stream_scan_progress_expression", fake_stream_scan),
                 patch("asic_rs_toolkit.server.collect_data", fake_collect_data),
             ):
                 await state.start_scan()
@@ -87,6 +90,9 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
             await state.stop()
 
             self.assertIsNone(status["last_scan_error"])
+            self.assertEqual(status["scan_progress"]["total"], 3)
+            self.assertEqual(status["scan_progress"]["scanned"], 3)
+            self.assertEqual(status["scan_progress"]["found"], 2)
             self.assertEqual([miner["ip"] for miner in status["miners"]], ["10.0.0.2", "10.0.0.3"])
             self.assertIsNotNone(status["miners"][0]["latest_history"])
 
@@ -97,7 +103,7 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
             await state.set_ranges(["10.0.0.1", "10.0.1.1-2"], [False, True])
 
             with (
-                patch("asic_rs_toolkit.server.stream_scan_expression", fake_expression_miner_stream),
+                patch("asic_rs_toolkit.server.stream_scan_progress_expression", fake_expression_miner_stream),
                 patch("asic_rs_toolkit.server.collect_data", fake_collect_data),
             ):
                 await state.start_scan()
@@ -121,7 +127,7 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
         async def fake_limited_stream(expression: str, concurrency_limit: int = 1000):
             seen_limits.append(concurrency_limit)
             await asyncio.sleep(0)
-            yield FakeMiner("10.0.0.2")
+            yield "10.0.0.2", FakeMiner("10.0.0.2")
 
         with tempfile.TemporaryDirectory() as directory:
             state = ToolkitState(ToolkitStore(Path(directory) / "toolkit.sqlite3"))
@@ -130,7 +136,7 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
             await state.update_settings({"scan_concurrency_limit": 7})
 
             with (
-                patch("asic_rs_toolkit.server.stream_scan_expression", fake_limited_stream),
+                patch("asic_rs_toolkit.server.stream_scan_progress_expression", fake_limited_stream),
                 patch("asic_rs_toolkit.server.collect_data", fake_collect_data),
             ):
                 await state.start_scan()

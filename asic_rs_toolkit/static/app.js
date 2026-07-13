@@ -8,6 +8,7 @@ const state = {
   table: { page: 1, pageSize: 10 },
   page: "miners",
   pendingAction: null,
+  pendingActionMiners: null,
   history: { ip: null, miner: null, points: [] },
   charts: {},
   chartHovering: {},
@@ -26,6 +27,11 @@ const state = {
   nextScanAtMs: null,
   nextDataAtMs: null,
   schedule: { liveScanning: false, liveDataUpdates: false, hasRanges: false, scanRunning: false, dataUpdateRunning: false },
+  scanProgress: { total: 0, scanned: 0, found: 0, current_ip: null },
+  scanProgressComplete: false,
+  scanProgressTimer: null,
+  scanProgressResetting: false,
+  scanProgressResetFrame: null,
   appliedAppearance: null,
   chartThemeKey: null,
   chartDebug: {},
@@ -138,6 +144,8 @@ function showPage(page) {
   document.querySelectorAll(".nav").forEach((el) => el.classList.toggle("active", el.dataset.page === page));
   $("pageTitle").textContent = pages[page].at(0);
   $("pageSubtitle").textContent = pages[page].at(1);
+  renderSelectionBar();
+  if (page !== "history") $("minerActionBar").hidden = true;
 }
 
 async function refresh() {
@@ -146,20 +154,64 @@ async function refresh() {
 }
 
 function applyStatus(data) {
+  const wasScanRunning = state.schedule.scanRunning;
+  const nextScanRunning = !!data.scan_running;
   if (!state.rangesPending && !isEditingRange()) {
     state.ranges = data.ranges || [];
     state.enabledRanges = normalizeEnabledRanges(data.enabled_ranges || [], state.ranges);
     state.rangeHosts = normalizeRangeHosts(data.range_hosts || [], state.ranges);
   }
   state.miners = data.miners || [];
+  if (state.history.ip) {
+    const activeMiner = state.miners.find((miner) => miner.ip === state.history.ip);
+    if (activeMiner) state.history.miner = activeMiner;
+  }
   clampTablePage();
   const historyChanged = mergeActiveHistoryPoint();
   if (!state.settingsDirty) state.settings = data.settings || state.settings;
   if (state.appliedAppearance !== state.settings.appearance) applyAppearance(state.settings.appearance);
   state.selected = new Set([...state.selected].filter((ip) => state.miners.some((miner) => miner.ip === ip)));
+  updateScanProgressState(data.scan_progress, wasScanRunning, nextScanRunning);
   updateScheduleState(data);
   renderAll({ updateHistoryCharts: historyChanged });
   if (data.last_scan_error) toast(data.last_scan_error);
+}
+
+function updateScanProgressState(progress, wasScanRunning, nextScanRunning) {
+  const incoming = progress || { total: 0, scanned: 0, found: 0, current_ip: null };
+  if (!wasScanRunning && nextScanRunning) {
+    clearScanProgressTimer();
+    state.scanProgressComplete = false;
+    state.scanProgressResetting = true;
+    state.scanProgress = { ...incoming, scanned: 0, found: 0, current_ip: null };
+    return;
+  }
+
+  state.scanProgress = incoming;
+  if (wasScanRunning && !nextScanRunning) {
+    clearScanProgressTimer();
+    state.scanProgressComplete = true;
+    state.scanProgressTimer = setTimeout(() => {
+      state.scanProgressComplete = false;
+      state.scanProgressTimer = null;
+      renderScanProgress();
+    }, 1000);
+  }
+}
+
+function clearScanProgressTimer() {
+  if (!state.scanProgressTimer) return;
+  clearTimeout(state.scanProgressTimer);
+  state.scanProgressTimer = null;
+}
+
+function scheduleScanProgressReveal() {
+  if (state.scanProgressResetFrame !== null) return;
+  state.scanProgressResetFrame = requestAnimationFrame(() => {
+    state.scanProgressResetting = false;
+    state.scanProgressResetFrame = null;
+    renderScanProgress();
+  });
 }
 
 function mergeActiveHistoryPoint() {
@@ -208,6 +260,7 @@ function renderAll({ updateHistoryCharts = true } = {}) {
   if (state.page === "history" && state.history.ip) renderHistory({ updateCharts: updateHistoryCharts });
   renderSelectionBar();
   renderSchedule();
+  renderScanProgress();
 }
 
 function renderSchedule() {
@@ -235,6 +288,26 @@ function renderSchedule() {
   dataButton.classList.toggle("active", state.schedule.liveDataUpdates);
   dataButton.classList.toggle("running", state.schedule.dataUpdateRunning || dataDue);
   dataButton.setAttribute("aria-pressed", String(state.schedule.liveDataUpdates));
+}
+
+function renderScanProgress() {
+  const progress = state.scanProgress || {};
+  const total = Number(progress.total) || 0;
+  const scanned = Number(progress.scanned) || 0;
+  const found = Number(progress.found) || 0;
+  const percent = total > 0 ? Math.max(0, Math.min(100, (scanned / total) * 100)) : 0;
+  const bar = $("scanProgress");
+  const visible = state.schedule.scanRunning || state.scanProgressComplete;
+  bar.hidden = !visible;
+  bar.classList.toggle("complete", state.scanProgressComplete);
+  bar.classList.toggle("resetting", state.scanProgressResetting);
+  $("scanProgressCount").textContent = state.scanProgressComplete
+    ? "Complete"
+    : total > 0 ? `${number(scanned)} / ${number(total)}` : `${number(scanned)}`;
+  $("scanProgressDetail").textContent = `${number(found)} found`;
+  $("scanProgressFill").style.width = !visible || state.scanProgressResetting ? "0%" : state.scanProgressComplete ? "100%" : total > 0 ? `${percent}%` : "100%";
+  $("scanProgressFill").classList.toggle("indeterminate", visible && !state.scanProgressResetting && !state.scanProgressComplete && total === 0);
+  if (state.scanProgressResetting) scheduleScanProgressReveal();
 }
 
 function scheduleText({ live, ready, deadline, active = false, waitingText }) {
@@ -491,6 +564,99 @@ function poolValue(pool, keys) {
   return "";
 }
 
+function formatValue(value) {
+  if (!hasValue(value)) return "-";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "number") return number(value);
+  if (Array.isArray(value)) return value.length ? `${number(value.length)} item${value.length === 1 ? "" : "s"}` : "-";
+  if (typeof value === "object") {
+    if (hasValue(value.value)) return `${number(value.value)} ${value.unit || ""}`.trim();
+    if (hasValue(value.mode)) return String(value.mode);
+    if (hasValue(value.name)) return String(value.name);
+    return Object.entries(value)
+      .filter(([, item]) => hasValue(item) && typeof item !== "object")
+      .slice(0, 3)
+      .map(([key, item]) => `${titleize(key)}: ${formatValue(item)}`)
+      .join(", ") || "-";
+  }
+  return String(value);
+}
+
+function titleize(value) {
+  return String(value || "")
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function valueByPath(source, path) {
+  return path.split(".").reduce((value, key) => value?.[key], source);
+}
+
+function firstPresent(...values) {
+  return values.find((value) => hasValue(value));
+}
+
+function minerIp(miner) {
+  return firstPresent(
+    miner?.ip,
+    miner?.data?.ip,
+    miner?.data?.ip_address,
+    miner?.data?.ipAddress,
+    miner?.data?.network?.ip,
+    miner?.data?.network?.ip_address,
+    miner?.data?.network_info?.ip,
+    miner?.data?.network_info?.ip_address,
+    miner?.data?.networkInfo?.ip,
+    miner?.data?.networkInfo?.ipAddress,
+    state.history.ip,
+  ) || "-";
+}
+
+function formatDetailValue(label, value) {
+  if (!hasValue(value)) return "-";
+  if (isTimestampLabel(label)) {
+    const date = readableDateTime(value);
+    if (date) return date;
+  }
+  const unit = unitForLabel(label);
+  if (unit && finiteValue(value) !== null) {
+    return `${number(value)} ${unit}`;
+  }
+  if (typeof value === "number") {
+    return number(value);
+  }
+  return formatValue(value);
+}
+
+function isTimestampLabel(label) {
+  const text = String(label || "").toLowerCase();
+  return ["time", "timestamp", "date", "seen"].some((term) => text.includes(term));
+}
+
+function readableDateTime(value) {
+  const raw = typeof value === "object" && value !== null && hasValue(value.value) ? value.value : value;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return "";
+  const milliseconds = parsed > 1e12 ? parsed : parsed > 1e9 ? parsed * 1000 : null;
+  if (!milliseconds) return "";
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+}
+
+function unitForLabel(label) {
+  const text = String(label || "").toLowerCase();
+  if (text.includes("temperature") || text === "temp" || text.endsWith(" temp")) return "°C";
+  if (text.includes("watt") || text.includes("power")) return "W";
+  if (text.includes("efficiency")) return "J/TH";
+  if (text.includes("percent")) return "%";
+  if (text.includes("rpm")) return "RPM";
+  if (text.includes("voltage") || text.includes("volt")) return "V";
+  if (text.includes("current") || text.includes("amp")) return "A";
+  if (text.includes("frequency") || text.includes("freq")) return "MHz";
+  return "";
+}
+
 function number(value) {
   if (value === null || value === undefined || value === "") return "";
   const n = Number(value);
@@ -540,7 +706,7 @@ function renderHomeStats() {
     metricCard("Issues", number(issues), issues ? "Needs attention" : "No active issues"),
     metricCard("Hashrate", hashrates.length ? `${number(hashrates.reduce((sum, value) => sum + value, 0))} ${unit}`.trim() : "-", "Reported total"),
     metricCard("Power", totalWatts ? `${number(totalWatts)} W` : "-", "Reported draw"),
-    metricCard("Average °C", temps.length ? number(temps.reduce((sum, value) => sum + value, 0) / temps.length) : "-", "Online miners"),
+    metricCard("Average Temperature", temps.length ? `${number(temps.reduce((sum, value) => sum + value, 0) / temps.length)} °C` : "-", "Online miners"),
   ].join("");
 }
 
@@ -964,17 +1130,21 @@ function renderHistory({ updateCharts = true } = {}) {
   $("historySubtitle").textContent = miner ? `${getMake(miner)} ${getModel(miner)} · ${getFirmware(miner)}` : "No miner selected.";
   $("openMinerWeb").disabled = !ip;
   $("historySummary").innerHTML = [
-    metricCard("Samples", number(points.length), "Last 30 minutes"),
-    metricCard("Hashrate", miner ? getHashratePair(miner) || "-" : "-", "Reported / expected"),
-    metricCard("Power", hasValue(latest.wattage) ? `${number(latest.wattage)} W` : "-", "Latest sample"),
-    metricCard("°C", hasValue(latest.temperature) ? number(latest.temperature) : "-", "Latest sample"),
-    metricCard("Efficiency", hasValue(latest.efficiency) ? number(latest.efficiency) : "-", "Latest sample"),
-    metricCard("Hostname", miner ? getHostname(miner) : "-", "Reported by miner"),
-    metricCard("Uptime", miner ? getUptime(miner) : "-", "Current session"),
-    metricCard("Chips", miner ? getChips(miner) : "-", "Working / expected"),
-    metricCard("Boards", miner ? getBoards(miner) : "-", "Active / expected"),
-    metricCard("Tuning", miner ? getTuning(miner) : "-", "Current target"),
+    importantMetricCard("State", miner ? minerState(miner).label : "-", miner?.last_seen ? `Seen ${new Date(miner.last_seen * 1000).toLocaleTimeString()}` : "No recent data"),
+    importantMetricCard("Hashrate", miner ? getHashratePair(miner) || "-" : "-", "Reported / expected"),
+    importantMetricCard("Power", hasValue(latest.wattage) ? `${number(latest.wattage)} W` : "-", "Latest sample"),
+    importantMetricCard("Temperature", hasValue(latest.temperature) ? `${number(latest.temperature)} °C` : "-", "Latest sample"),
+    importantMetricCard("Efficiency", hasValue(latest.efficiency) ? `${number(latest.efficiency)} J/TH` : "-", "Latest sample"),
+    importantMetricCard("Uptime", miner ? getUptime(miner) : "-", "Current session"),
+    importantMetricCard("Pool", miner ? getPool(miner) : "-", "Active pool"),
+    importantMetricCard("Tuning", miner ? getTuning(miner) : "-", "Current target"),
   ].join("");
+  renderMinerPageActions(miner);
+  renderMinerDetailGroups(miner);
+  renderMinerPools(miner);
+  renderMinerFans(miner);
+  renderMinerBoards(miner);
+  renderMinerMessages(miner);
   if (updateCharts) {
     const expectedHashrate = miner ? getExpectedHashrateValue(miner) : null;
     const targetWattage = miner ? getTuningTargetWattage(miner) : null;
@@ -996,6 +1166,322 @@ function renderHistory({ updateCharts = true } = {}) {
       color: "warning",
     }] : []);
   }
+}
+
+function importantMetricCard(label, value, detail) {
+  return `
+    <div class="important-summary-item">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </div>
+  `;
+}
+
+function renderMinerPageActions(miner) {
+  const target = miner ? [miner] : [];
+  const groups = actionGroups
+    .map((group) => ({
+      ...group,
+      entries: availableActionsForGroup(group, target),
+    }))
+    .filter((group) => group.entries.length > 0);
+  $("minerActionBar").hidden = state.page !== "history" || groups.length === 0;
+  $("historyActionGroups").innerHTML = groups.map((group) => `
+      <button class="btn ${group.entries.some((entry) => entry.unsupported.length) ? "partial-action" : ""}" data-history-action-group="${group.id}" type="button">
+        ${escapeHtml(group.label)}
+        <span>${actionGroupSummary(group, target)}</span>
+      </button>
+    `).join("");
+}
+
+function renderMinerDetailGroups(miner) {
+  renderDetailGroup("minerDeviceDetails", miner, [
+    ["Make", "data.device_info.make"],
+    ["Model", "data.device_info.model"],
+    ["Serial Number", "data.serial_number"],
+    ["Control Board", "data.control_board_version"],
+  ]);
+  renderDetailGroup("minerNetworkDetails", miner, [
+    ["IP", minerIp(miner)],
+    ["Hostname", "data.hostname"],
+    ["MAC", "data.mac"],
+    ["Last Seen", miner?.last_seen],
+  ]);
+  renderDetailGroup("minerMiningDetails", miner, [
+    ["Mining", "data.is_mining"],
+    ["Hashrate", "data.hashrate"],
+    ["Expected Hashrate", "data.expected_hashrate"],
+    ["Tuning Percent", "data.tuning_percent"],
+    ["Tuning Target", miner ? getTuning(miner) : "-"],
+    ["Fault Light", "data.light_flashing"],
+  ]);
+  renderDetailGroup("minerThermalDetails", miner, [
+    ["Wattage", "data.wattage"],
+    ["Efficiency", "data.efficiency"],
+    ["Average Temperature", "data.average_temperature"],
+    ["Fluid Temperature", "data.fluid_temperature"],
+    ["Outlet Fluid Temperature", "data.outlet_fluid_temperature"],
+  ]);
+  renderDetailGroup("minerFirmwareDetails", miner, [
+    ["Firmware", miner ? getFirmware(miner) : "-"],
+    ["Firmware Version", "data.firmware_version"],
+    ["API Version", "data.api_version"],
+    ["Schema Version", "data.schema_version"],
+  ]);
+}
+
+function renderDetailGroup(id, miner, fields) {
+  $(id).innerHTML = fields
+    .map(([label, source]) => detailItem(label, typeof source === "string" && source.includes(".") ? valueByPath(miner, source) : source))
+    .join("");
+}
+
+function renderMinerPools(miner) {
+  const pools = poolCandidates(miner || {});
+  $("minerPools").innerHTML = pools.length ? pools.map((pool, index) => {
+    const status = pool.status || pool.state || pool.pool_status || (isActivePool(pool) ? "active" : "");
+    const details = [
+      ["User", poolValue(pool, ["user", "username", "pool_user", "poolUser", "worker", "worker_name", "workerName"])],
+      ["Priority", poolValue(pool, ["priority", "prio"])],
+      ["Quota", poolValue(pool, ["quota"])],
+      ["Accepted", poolValue(pool, ["accepted", "accepted_shares", "acceptedShares"])],
+      ["Rejected", poolValue(pool, ["rejected", "rejected_shares", "rejectedShares"])],
+      ["Difficulty", poolValue(pool, ["difficulty", "diff"])],
+      ["Last Share", poolValue(pool, ["last_share_time", "lastShareTime", "last_share", "lastShare"])],
+    ].filter(([, value]) => hasValue(value));
+    return poolCard(poolValue(pool, ["url", "pool_url", "poolUrl", "stratum_url", "stratumUrl", "uri"]) || `Pool ${index + 1}`, details, pool, status);
+  }).join("") : `<div class="empty-list">No pools reported.</div>`;
+}
+
+function renderMinerFans(miner) {
+  const fans = miner?.data?.fans || miner?.data?.fan_data || [];
+  const psuFans = miner?.data?.psu_fans || [];
+  const cards = [];
+  if (Array.isArray(fans)) {
+    cards.push(...fans.map((fan, index) => fanCard(fan, `Fan ${index + 1}`)));
+  }
+  if (Array.isArray(psuFans)) {
+    cards.push(...psuFans.map((fan, index) => fanCard(fan, `PSU Fan ${index + 1}`)));
+  }
+  $("minerFans").innerHTML = cards.join("") || `<div class="empty-list">No fan details reported.</div>`;
+}
+
+function renderMinerBoards(miner) {
+  const hashboards = miner?.data?.hashboards || [];
+  $("minerBoards").innerHTML = Array.isArray(hashboards) && hashboards.length
+    ? hashboards.map((board, index) => boardCard(board, index, miner, hashboards.length)).join("")
+    : `<div class="empty-list">No hashboard details reported.</div>`;
+}
+
+function fanCard(fan, label) {
+  const speed = firstFinite(fan, ["speed", "rpm", "value", "percent", "percentage"]);
+  const isPercent = speed !== null && speed <= 100 && !hasAny(fan, ["rpm"]);
+  const display = speed === null ? "-" : `${number(speed)}${isPercent ? "%" : " RPM"}`;
+  const percent = isPercent ? speed : null;
+  const state = fanLightState(fan, speed);
+  return `
+    <div class="hardware-card fan-card ${state.className}">
+      <span class="hardware-light ${state.className}" title="${escapeHtml(state.label)}"></span>
+      <div class="hardware-card-body">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(display)}</span>
+        ${percent !== null ? progressBar(percent, `${number(percent)}% speed`) : ""}
+        <small>${escapeHtml(state.label)}</small>
+      </div>
+    </div>
+  `;
+}
+
+function boardCard(board, index, miner, boardCount) {
+  const state = boardLightState(board);
+  const working = firstFinite(board, ["working_chips", "chips_working", "active_chips", "good_chips"]);
+  const expected = firstFinite(board, ["expected_chips", "nominal_chips", "total_chips", "chip_count", "chips"]);
+  const chipPercent = expected && working !== null ? (working / expected) * 100 : null;
+  const temp = firstFinite(board, ["temperature", "temp", "chip_temp", "average_temperature"]);
+  const hashrate = board?.hashrate || board?.rate;
+  const expectedHashrate = boardHashrateTarget(board, miner, boardCount, hashrate);
+  const hashrateValue = rateValue(hashrate);
+  const expectedHashrateValue = rateValue(expectedHashrate);
+  const hashratePercent = hasValue(hashrate) && hasValue(expectedHashrate)
+    ? expectedHashrateValue > 0 ? (hashrateValue / expectedHashrateValue) * 100 : 100
+    : null;
+  const active = activeField(board);
+  return `
+    <div class="hardware-card board-card ${state.className}">
+      <span class="hardware-light ${state.className}" title="${escapeHtml(state.label)}"></span>
+      <div class="hardware-card-body">
+        <div class="hardware-card-title">
+          <strong>${escapeHtml(board?.name || board?.id || `Board ${index + 1}`)}</strong>
+        </div>
+        <div class="board-meta">
+          <span>${active ? "Active" : "Inactive"}</span>
+          ${temp !== null ? `<span>${escapeHtml(number(temp))} °C</span>` : ""}
+        </div>
+        ${chipPercent !== null ? progressBar(chipPercent, `${number(working)} / ${number(expected)} chips`) : `<small>Chip count unavailable</small>`}
+        ${hashratePercent !== null ? progressBar(hashratePercent, `${formatValue(hashrate)} / ${formatValue(expectedHashrate)}`) : `<small>Hashrate unavailable</small>`}
+      </div>
+    </div>
+  `;
+}
+
+function boardHashrateTarget(board, miner, boardCount, currentHashrate) {
+  const boardExpected = board?.expected_hashrate || board?.nominal_hashrate;
+  if (hasValue(boardExpected)) return boardExpected;
+
+  const minerExpected = miner?.data?.expected_hashrate;
+  if (hasValue(minerExpected) && boardCount > 0) return divideRate(minerExpected, boardCount);
+
+  return currentHashrate;
+}
+
+function divideRate(rate, divisor) {
+  const value = rateValue(rate);
+  const safeDivisor = Number(divisor) || 1;
+  if (typeof rate === "object" && rate !== null) return { ...rate, value: value / safeDivisor };
+  return value / safeDivisor;
+}
+
+function fanLightState(fan, speed) {
+  const base = hardwareState(fan);
+  if (base.className === "err" || base.className === "warn") return base;
+  if (speed !== null) {
+    if (speed > 0) return { label: "Running", className: "ok" };
+    return { label: "Stopped", className: "inactive" };
+  }
+  if (activeField(fan)) return { label: "Running", className: "ok" };
+  return { label: base.label, className: base.className || "inactive" };
+}
+
+function boardLightState(board) {
+  const base = hardwareState(board);
+  if (base.className === "err") return base;
+  const active = activeField(board);
+  if (!active) return { label: "Inactive", className: "inactive" };
+
+  const working = firstFinite(board, ["working_chips", "chips_working", "active_chips", "good_chips"]);
+  const expected = firstFinite(board, ["expected_chips", "nominal_chips", "total_chips", "chip_count", "chips"]);
+  if (working === 0) return { label: "No chips", className: "err" };
+  if (expected && working !== null && working < expected) return { label: "Chip count low", className: "warn" };
+
+  const hashrate = rateValue(board?.hashrate || board?.rate);
+  const expectedHashrate = rateValue(board?.expected_hashrate || board?.nominal_hashrate);
+  if (expectedHashrate > 0 && hashrate < expectedHashrate * 0.8) return { label: "Low hashrate", className: "warn" };
+  if (hashrate === 0 && expectedHashrate > 0) return { label: "No hashrate", className: "err" };
+  if (base.className === "warn") return base;
+  return { label: "Working", className: "ok" };
+}
+
+function progressBar(percent, label) {
+  const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
+  return `
+    <div class="mini-progress" aria-label="${escapeHtml(label)}">
+      <span style="width: ${clamped}%"></span>
+      <small>${escapeHtml(label)}</small>
+    </div>
+  `;
+}
+
+function hardwareState(item) {
+  if (!item || typeof item !== "object") return { label: "Unknown", className: "" };
+  const text = String(item.status || item.state || item.health || "").toLowerCase();
+  if (item.error || item.fault || ["error", "fault", "failed", "dead", "missing"].some((value) => text.includes(value))) {
+    return { label: titleize(item.status || item.state || "Issue"), className: "err" };
+  }
+  if (["warn", "warning", "degraded", "throttled"].some((value) => text.includes(value))) {
+    return { label: titleize(item.status || item.state || "Warning"), className: "warn" };
+  }
+  if (activeField(item)) return { label: titleize(item.status || item.state || "Active"), className: "ok" };
+  if (text) return { label: titleize(text), className: "paused" };
+  return { label: "Reported", className: "" };
+}
+
+function activeField(item) {
+  if (!item || typeof item !== "object") return false;
+  if (item.active === false || item.enabled === false || item.is_active === false || item.online === false) return false;
+  if (item.active === true || item.enabled === true || item.is_active === true || item.online === true) return true;
+  const text = String(item.status || item.state || "").toLowerCase();
+  return ["active", "online", "working", "ok", "alive", "tuned"].some((value) => text.includes(value));
+}
+
+function firstFinite(item, keys) {
+  for (const key of keys) {
+    const value = finiteValue(item?.[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function hasAny(item, keys) {
+  return keys.some((key) => item?.[key] !== undefined && item?.[key] !== null && item?.[key] !== "");
+}
+
+function renderMinerMessages(miner) {
+  const messages = miner?.data?.messages || [];
+  $("minerMessages").innerHTML = messages.length ? messages.map((message) => {
+    const severity = message.severity || message.level || message.kind || "Message";
+    const text = message.message || message.text || message.detail || String(message);
+    return messageCard(severity, text);
+  }).join("") : `<div class="empty-list">No messages reported.</div>`;
+}
+
+function detailItem(label, value) {
+  return `
+    <div class="detail-item">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(formatDetailValue(label, value))}</strong>
+    </div>
+  `;
+}
+
+function poolCard(title, details, pool, status) {
+  const state = poolLightState(pool, status);
+  return `
+    <div class="detail-list-item pool-card ${state.className}">
+      <span class="hardware-light ${state.className}" title="${escapeHtml(state.label)}"></span>
+      <strong>${escapeHtml(title)}</strong>
+      <div class="pool-details">
+        ${details.length ? details.map(([label, value]) => `
+          <span><b>${escapeHtml(label)}</b>${escapeHtml(formatDetailValue(label, value))}</span>
+        `).join("") : `<span>No extra pool details</span>`}
+      </div>
+    </div>
+  `;
+}
+
+function poolLightState(pool, status) {
+  const text = String(status || pool?.status || pool?.state || pool?.pool_status || "").toLowerCase();
+  if (isActivePool(pool) || ["active", "alive", "enabled", "online", "working"].some((value) => text.includes(value))) {
+    return { label: "Active", className: "ok" };
+  }
+  return { label: "Inactive", className: "inactive" };
+}
+
+function messageCard(severity, text) {
+  const state = messageStateClass(severity, text);
+  return `
+    <div class="detail-list-item message-card ${state}">
+      <strong>${escapeHtml(severity || "Message")}</strong>
+      <span>${escapeHtml(text || "-")}</span>
+    </div>
+  `;
+}
+
+function messageStateClass(severity, text) {
+  const value = `${severity || ""} ${text || ""}`.toLowerCase();
+  if (["error", "err", "fault", "fail", "critical", "fatal"].some((term) => value.includes(term))) return "err";
+  if (["warn", "warning", "degraded", "throttle", "low"].some((term) => value.includes(term))) return "warn";
+  if (["ok", "success", "healthy", "normal", "active"].some((term) => value.includes(term))) return "ok";
+  return "info";
+}
+
+function listItem(title, detail) {
+  return `
+    <div class="detail-list-item">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(detail || "-")}</span>
+    </div>
+  `;
 }
 
 function hasValue(value) {
@@ -1247,11 +1733,15 @@ function selectedMiners() {
   return state.miners.filter((miner) => state.selected.has(miner.ip));
 }
 
-function supportedFor(action, miners = selectedMiners()) {
+function actionTargetMiners() {
+  return state.pendingActionMiners || selectedMiners();
+}
+
+function supportedFor(action, miners = actionTargetMiners()) {
   return miners.filter((miner) => miner.supports?.[action.flag]);
 }
 
-function unsupportedFor(action, miners = selectedMiners()) {
+function unsupportedFor(action, miners = actionTargetMiners()) {
   return miners.filter((miner) => !miner.supports?.[action.flag]);
 }
 
@@ -1290,10 +1780,24 @@ function availableActionGroups() {
     .filter((group) => group.entries.length > 0);
 }
 
+function actionGroupCoverage(group, miners) {
+  const supportedIps = new Set();
+  group.entries.forEach((entry) => {
+    entry.supported.forEach((miner) => supportedIps.add(miner.ip));
+  });
+  return `${supportedIps.size}/${miners.length}`;
+}
+
+function actionGroupSummary(group, miners) {
+  if (group.entries.length === 1) return `${group.entries[0].supported.length}/${miners.length}`;
+  if (group.id === "mining_state" || group.id === "tuning") return actionGroupCoverage(group, miners);
+  return `${group.entries.length} options`;
+}
+
 function renderSelectionBar() {
   const selected = selectedMiners();
   const bar = $("selectionBar");
-  bar.hidden = selected.length === 0;
+  bar.hidden = state.page !== "miners" || selected.length === 0;
   $("selectionBarCount").textContent = `${selected.length} selected`;
   $("selectionBarHint").textContent = selected.length
     ? "Actions shown support at least one selected miner."
@@ -1301,53 +1805,53 @@ function renderSelectionBar() {
   $("selectionActions").innerHTML = availableActionGroups().map((group) => `
     <button class="btn ${group.entries.some((entry) => entry.unsupported.length) ? "partial-action" : ""}" data-open-action-group="${group.id}">
       ${escapeHtml(group.label)}
-      <span>${group.entries.length === 1 ? `${group.entries[0].supported.length}/${selected.length}` : `${group.entries.length} options`}</span>
+      <span>${actionGroupSummary(group, selected)}</span>
     </button>
   `).join("");
 }
 
-function openActionDialog(actionId, groupId = null) {
+function openActionDialog(actionId, groupId = null, miners = state.pendingActionMiners || selectedMiners()) {
   const action = actionById(actionId);
   const group = groupId ? actionGroupById(groupId) : actionGroups.find((item) => item.actions.includes(actionId));
   if (!action || !group) return;
-  renderActionDialog(group, action);
+  renderActionDialog(group, action, miners);
   if (!$("actionDialog").open) $("actionDialog").showModal();
 }
 
-function openActionGroupDialog(groupId) {
+function openActionGroupDialog(groupId, miners = selectedMiners()) {
   const group = actionGroupById(groupId);
   if (!group) return;
-  const entries = availableActionsForGroup(group);
+  const entries = availableActionsForGroup(group, miners);
   if (!entries.length) return;
-  renderActionDialog(group, defaultActionForGroup(group, entries));
+  renderActionDialog(group, defaultActionForGroup(group, entries, miners), miners);
   $("actionDialog").showModal();
 }
 
-function defaultActionForGroup(group, entries) {
+function defaultActionForGroup(group, entries, miners = selectedMiners()) {
   if (group.id !== "mining_state") return entries[0].action;
-  const selected = selectedMiners();
-  const wantsMiningOn = selected.length > 0 && selected.some((miner) => miner.data?.is_mining);
+  const wantsMiningOn = miners.length > 0 && miners.some((miner) => miner.data?.is_mining);
   const actionId = wantsMiningOn ? "resume" : "pause";
   return entries.find((entry) => entry.action.id === actionId)?.action || entries[0].action;
 }
 
-function renderActionDialog(group, action) {
-  const supported = supportedFor(action);
-  const unsupported = unsupportedFor(action);
+function renderActionDialog(group, action, miners = selectedMiners()) {
+  const supported = supportedFor(action, miners);
+  const unsupported = unsupportedFor(action, miners);
   state.pendingAction = action;
+  state.pendingActionMiners = miners;
 
   $("actionTitle").textContent = group.label;
   $("actionSubtitle").textContent = `${supported.length} supported, ${unsupported.length} unsupported`;
-  $("actionOptions").innerHTML = actionOptionsHtml(group, action);
+  $("actionOptions").innerHTML = actionOptionsHtml(group, action, miners);
   $("actionSupportedList").innerHTML = renderDeviceList(supported, "No selected miner supports this action.");
   $("actionUnsupportedList").innerHTML = renderDeviceList(unsupported, "All selected miners support this action.");
   $("actionFields").innerHTML = actionFieldsHtml(action);
   $("applyAction").disabled = supported.length === 0;
 }
 
-function actionOptionsHtml(group, activeAction) {
-  const entries = availableActionsForGroup(group);
-  if (group.id === "mining_state") return miningStateToggleHtml(activeAction, entries);
+function actionOptionsHtml(group, activeAction, miners = actionTargetMiners()) {
+  const entries = availableActionsForGroup(group, miners);
+  if (group.id === "mining_state") return miningStateToggleHtml(activeAction, entries, miners);
   if (entries.length <= 1) return "";
   return `
     <div class="action-options" role="tablist" aria-label="${escapeHtml(group.label)} options">
@@ -1361,15 +1865,15 @@ function actionOptionsHtml(group, activeAction) {
           type="button"
         >
           ${escapeHtml(action.label)}
-          <span>${supported.length}/${selectedMiners().length}</span>
+          <span>${supported.length}/${miners.length}</span>
         </button>
       `).join("")}
     </div>
   `;
 }
 
-function miningStateToggleHtml(activeAction, entries) {
-  const selectedCount = selectedMiners().length;
+function miningStateToggleHtml(activeAction, entries, miners = actionTargetMiners()) {
+  const selectedCount = miners.length;
   const checked = activeAction.id === "resume";
   const availability = entries.find((entry) => entry.action.id === activeAction.id);
   return `
@@ -1543,6 +2047,7 @@ document.addEventListener("click", async (event) => {
   }
   if (button?.dataset.openAction) openActionDialog(button.dataset.openAction);
   if (button?.dataset.openActionGroup) openActionGroupDialog(button.dataset.openActionGroup);
+  if (button?.dataset.historyActionGroup && state.history.miner) openActionGroupDialog(button.dataset.historyActionGroup, [state.history.miner]);
   if (button?.dataset.selectAction) openActionDialog(button.dataset.selectAction, button.dataset.actionGroup);
   const historyRow = target.closest("tr[data-open-history]");
   if (historyRow && !target.closest("input, button, a, label")) await openHistory(historyRow.dataset.openHistory);
@@ -1558,8 +2063,14 @@ document.addEventListener("click", async (event) => {
     });
     const failures = results.results.filter((result) => !result.ok);
     $("actionDialog").close();
+    state.pendingActionMiners = null;
     toast(failures.length ? `${failures.length} action failed` : `${action.label} applied`);
   }
+});
+
+$("actionDialog").addEventListener("close", () => {
+  state.pendingAction = null;
+  state.pendingActionMiners = null;
 });
 
 document.addEventListener("pointerover", (event) => {
