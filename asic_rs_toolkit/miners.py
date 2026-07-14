@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
 from collections import deque
+from collections.abc import AsyncIterator
+from inspect import isawaitable
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -34,6 +35,7 @@ SUPPORT_FLAGS = (
 
 class AppSettings(BaseModel):
     ranges: list[str] = Field(default_factory=list)
+    range_names: list[str] = Field(default_factory=list)
     enabled_ranges: list[bool] = Field(default_factory=list)
     live_scanning: bool = False
     live_data_updates: bool = False
@@ -64,6 +66,7 @@ class MinerRecord(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
     supports: dict[str, bool] = Field(default_factory=dict)
     error: str | None = None
+    loading: bool = False
     last_seen: float | None = None
     history: deque[HistoryPoint] = Field(default_factory=deque)
 
@@ -73,6 +76,7 @@ class MinerRecord(BaseModel):
             "data": self.data,
             "supports": self.supports,
             "error": self.error,
+            "loading": self.loading,
             "last_seen": self.last_seen,
             "history_count": len(self.history),
             "latest_history": self.history[-1].model_dump() if self.history else None,
@@ -105,6 +109,16 @@ async def stream_scan_progress_expression(
 
 async def get_miner(ip: str) -> Miner | None:
     return await MinerFactory().get_miner(ip)
+
+
+async def revalidate_miner(miner: Miner) -> bool:
+    revalidate = getattr(miner, "revalidate", None)
+    if revalidate is None:
+        return True
+    result = revalidate()
+    if isawaitable(result):
+        result = await result
+    return bool(result)
 
 
 async def collect_data(miner: Miner) -> tuple[dict[str, Any], dict[str, bool]]:

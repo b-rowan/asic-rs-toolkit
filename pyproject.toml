@@ -29,3 +29,6 @@ include = ["asic_rs_toolkit*"]
 
 [tool.setuptools.package-data]
 asic_rs_toolkit = ["static/*.html", "static/*.css", "static/*.js", "static/assets/*.svg", "static/assets/*.ico"]
+
+[tool.uv.sources]
+pyasic-rs = { git = "https://github.com/b-rowan/asic-rs.git", rev = "add-revalidate-trait" }

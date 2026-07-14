@@ -1,5 +1,6 @@
 const state = {
   ranges: [],
+  rangeNames: [],
   enabledRanges: [],
   rangeHosts: [],
   miners: [],
@@ -9,6 +10,7 @@ const state = {
   page: "miners",
   pendingAction: null,
   pendingActionMiners: null,
+  actionSubmitting: false,
   history: { ip: null, miner: null, points: [] },
   charts: {},
   chartHovering: {},
@@ -23,6 +25,7 @@ const state = {
   },
   settingsDirty: false,
   rangesPending: false,
+  rangeSearch: "",
   rangePreviewRequest: 0,
   nextScanAtMs: null,
   nextDataAtMs: null,
@@ -158,6 +161,7 @@ function applyStatus(data) {
   const nextScanRunning = !!data.scan_running;
   if (!state.rangesPending && !isEditingRange()) {
     state.ranges = data.ranges || [];
+    state.rangeNames = normalizeRangeNames(data.range_names || [], state.ranges);
     state.enabledRanges = normalizeEnabledRanges(data.enabled_ranges || [], state.ranges);
     state.rangeHosts = normalizeRangeHosts(data.range_hosts || [], state.ranges);
   }
@@ -340,6 +344,7 @@ function minerErrors(miner) {
 }
 
 function minerState(miner) {
+  if (miner.loading) return { label: "Loading", className: "loading", order: 1 };
   if (miner.error) return { label: "Offline", className: "offline", order: 0 };
   const hasData = miner.data && Object.keys(miner.data).length > 0;
   if (!hasData || !miner.last_seen) return { label: "Offline", className: "offline", order: 0 };
@@ -350,6 +355,10 @@ function minerState(miner) {
   if (warnings) return { label: `${warnings} warning${warnings === 1 ? "" : "s"}`, className: "warn", order: 3 };
   if (miner.data?.is_mining === true) return { label: "Mining", className: "ok", order: 4 };
   return { label: "Unknown", className: "", order: 1 };
+}
+
+function hasCurrentMinerData(miner) {
+  return !!miner && !miner.loading && !miner.error && !!miner.last_seen;
 }
 
 function getDeviceInfo(miner) {
@@ -507,11 +516,16 @@ function tuningTargetWattageValue(target) {
 
 function getFans(miner) {
   const fans = miner.data?.fans || miner.data?.fan_data || [];
-  if (!Array.isArray(fans) || !fans.length) return "-";
-  const speeds = fans
-    .map((fan) => fan?.speed || fan?.rpm || fan?.value)
+  const psuFans = miner.data?.psu_fans || [];
+  const allFans = [
+    ...(Array.isArray(fans) ? fans : []),
+    ...(Array.isArray(psuFans) ? psuFans : []),
+  ];
+  if (!allFans.length) return "-";
+  const speeds = allFans
+    .map((fan) => fan?.speed ?? fan?.rpm ?? fan?.value)
     .filter((value) => value !== undefined && value !== null && value !== "");
-  if (!speeds.length) return `${fans.length} fan${fans.length === 1 ? "" : "s"}`;
+  if (!speeds.length) return `${allFans.length} fan${allFans.length === 1 ? "" : "s"}`;
   return speeds.map(number).join(" / ");
 }
 
@@ -695,11 +709,12 @@ function numericDuration(value) {
 
 function renderHomeStats() {
   const miners = state.miners;
-  const totalWatts = miners.reduce((sum, miner) => sum + numeric(miner.data?.wattage), 0);
-  const temps = miners.map((miner) => numeric(miner.data?.average_temperature)).filter((value) => value > 0);
-  const hashrates = miners.map((miner) => numeric(miner.data?.hashrate?.value)).filter((value) => value > 0);
-  const unit = miners.find((miner) => miner.data?.hashrate?.unit)?.data.hashrate.unit || "";
-  const mining = miners.filter((miner) => miner.data?.is_mining).length;
+  const currentMiners = miners.filter(hasCurrentMinerData);
+  const totalWatts = currentMiners.reduce((sum, miner) => sum + numeric(miner.data?.wattage), 0);
+  const temps = currentMiners.map((miner) => numeric(miner.data?.average_temperature)).filter((value) => value > 0);
+  const hashrates = currentMiners.map((miner) => numeric(miner.data?.hashrate?.value)).filter((value) => value > 0);
+  const unit = currentMiners.find((miner) => miner.data?.hashrate?.unit)?.data.hashrate.unit || "";
+  const mining = currentMiners.filter((miner) => miner.data?.is_mining).length;
   const issues = miners.filter((miner) => minerErrors(miner) > 0).length;
   $("homeStats").innerHTML = [
     metricCard("Miners", number(miners.length), `${mining} mining`),
@@ -726,28 +741,43 @@ function numeric(value) {
 }
 
 function renderRanges() {
+  $("rangeSearchInput").value = state.rangeSearch;
   if (!state.ranges.length) {
     $("rangeList").innerHTML = "";
+    return;
+  }
+  const rows = filteredRangeRows();
+  if (!rows.length) {
+    $("rangeList").innerHTML = `<div class="range-empty">No ranges match this search.</div>`;
     return;
   }
   $("rangeList").innerHTML = `
     <table class="range-table">
       <thead>
         <tr>
+          <th class="range-order">Order</th>
           <th class="range-enabled">Enabled</th>
+          <th>Name</th>
           <th>Range</th>
           <th class="range-hosts">Hosts</th>
           <th class="range-remove"></th>
         </tr>
       </thead>
       <tbody>
-        ${state.ranges.map((range, index) => `
+        ${rows.map(({ range, name, index }) => `
           <tr class="${state.enabledRanges[index] ? "" : "off"}">
+            <td class="range-order">
+              <button class="icon-btn" data-move-range="${index}" data-move-direction="-1" ${index === 0 ? "disabled" : ""} aria-label="Move ${escapeHtml(name || range)} up" title="Move up">&#8593;</button>
+              <button class="icon-btn" data-move-range="${index}" data-move-direction="1" ${index === state.ranges.length - 1 ? "disabled" : ""} aria-label="Move ${escapeHtml(name || range)} down" title="Move down">&#8595;</button>
+            </td>
             <td class="range-enabled">
               <label class="switch range-switch" title="${state.enabledRanges[index] ? "Disable range" : "Enable range"}">
                 <input type="checkbox" data-range-enabled="${index}" ${state.enabledRanges[index] ? "checked" : ""} />
                 <i></i>
               </label>
+            </td>
+            <td class="range-name">
+              <input class="range-edit-input" data-range-name-edit="${index}" value="${escapeHtml(name)}" spellcheck="false" aria-label="Edit name for ${escapeHtml(range)}" placeholder="Name" />
             </td>
             <td class="range-expression">
               <input class="range-edit-input" data-range-edit="${index}" value="${escapeHtml(range)}" spellcheck="false" aria-label="Edit range ${escapeHtml(range)}" />
@@ -763,12 +793,25 @@ function renderRanges() {
   `;
 }
 
+function filteredRangeRows() {
+  const query = state.rangeSearch.trim().toLowerCase();
+  return state.ranges
+    .map((range, index) => ({
+      range,
+      name: state.rangeNames[index] || "",
+      index,
+    }))
+    .filter(({ range, name }) => !query || range.toLowerCase().includes(query) || name.toLowerCase().includes(query));
+}
+
 async function persistRanges(message = "Ranges updated") {
   state.rangesPending = true;
   try {
+    state.rangeNames = normalizeRangeNames(state.rangeNames, state.ranges);
     state.enabledRanges = normalizeEnabledRanges(state.enabledRanges, state.ranges);
-    const data = await post("/api/ranges", { ranges: state.ranges, enabled_ranges: state.enabledRanges });
+    const data = await post("/api/ranges", { ranges: state.ranges, range_names: state.rangeNames, enabled_ranges: state.enabledRanges });
     state.ranges = data.ranges || [];
+    state.rangeNames = normalizeRangeNames(data.range_names || [], state.ranges);
     state.enabledRanges = normalizeEnabledRanges(data.enabled_ranges || [], state.ranges);
     state.rangeHosts = normalizeRangeHosts(data.range_hosts || [], state.ranges);
     renderRanges();
@@ -782,12 +825,16 @@ function normalizeEnabledRanges(enabledRanges, ranges) {
   return ranges.map((_, index) => index < enabledRanges.length ? !!enabledRanges[index] : true);
 }
 
+function normalizeRangeNames(rangeNames, ranges) {
+  return ranges.map((_, index) => index < rangeNames.length ? String(rangeNames[index] || "").trim() : "");
+}
+
 function normalizeRangeHosts(rangeHosts, ranges) {
   return ranges.map((_, index) => Number.isFinite(Number(rangeHosts[index])) ? Number(rangeHosts[index]) : 0);
 }
 
 function isEditingRange() {
-  return document.activeElement instanceof HTMLElement && document.activeElement.matches("[data-range-edit]");
+  return document.activeElement instanceof HTMLElement && document.activeElement.matches("[data-range-edit], [data-range-name-edit], #rangeSearchInput");
 }
 
 function isEditingTablePager() {
@@ -805,19 +852,73 @@ async function editRange(index, value) {
     toast("Range expression is required");
     return;
   }
-  const previous = [...state.ranges];
-  const previousHosts = [...state.rangeHosts];
+  const previous = snapshotRanges();
   state.ranges[index] = range;
   state.rangeHosts[index] = 0;
   renderRanges();
   try {
     await persistRanges("Range updated");
   } catch (error) {
-    state.ranges = previous;
-    state.rangeHosts = previousHosts;
+    restoreRanges(previous);
     renderRanges();
     toast(error.message);
   }
+}
+
+async function editRangeName(index, value) {
+  const name = value.trim();
+  if (name === state.rangeNames[index]) {
+    renderRanges();
+    return;
+  }
+  const previous = [...state.rangeNames];
+  state.rangeNames[index] = name;
+  renderRanges();
+  try {
+    await persistRanges("Range name updated");
+  } catch (error) {
+    state.rangeNames = previous;
+    renderRanges();
+    toast(error.message);
+  }
+}
+
+async function moveRange(index, direction) {
+  const target = index + direction;
+  if (target < 0 || target >= state.ranges.length) return;
+  const previous = snapshotRanges();
+  swapItems(state.ranges, index, target);
+  swapItems(state.rangeNames, index, target);
+  swapItems(state.enabledRanges, index, target);
+  swapItems(state.rangeHosts, index, target);
+  renderRanges();
+  try {
+    await persistRanges("Range moved");
+  } catch (error) {
+    restoreRanges(previous);
+    renderRanges();
+    toast(error.message);
+  }
+}
+
+function snapshotRanges() {
+  return {
+    ranges: [...state.ranges],
+    rangeNames: [...state.rangeNames],
+    enabledRanges: [...state.enabledRanges],
+    rangeHosts: [...state.rangeHosts],
+  };
+}
+
+function restoreRanges(snapshot) {
+  state.ranges = snapshot.ranges;
+  state.rangeNames = snapshot.rangeNames;
+  state.enabledRanges = snapshot.enabledRanges;
+  state.rangeHosts = snapshot.rangeHosts;
+}
+
+function swapItems(items, left, right) {
+  [items[left], items[right]] = [items[right], items[left]];
 }
 
 function renderSettings(force = false) {
@@ -877,10 +978,9 @@ function destroyHistoryCharts() {
   state.chartPending = {};
 }
 
-function renderTable() {
+function renderTable({ forcePager = false } = {}) {
   const miners = sortedMiners();
   clampTablePage(miners.length);
-  const pageSize = state.table.pageSize;
   const pageCount = tablePageCount(miners.length);
   const pageMiners = currentPageMiners(miners);
   const tbody = $("minerRows");
@@ -900,7 +1000,7 @@ function renderTable() {
   } else if (state.activeStatePopover) {
     hideStatePopover();
   }
-  if (!isEditingTablePager()) renderTablePager(miners.length, pageCount);
+  if (forcePager || !isEditingTablePager()) renderTablePager(miners.length, pageCount);
 }
 
 function renderMinerRows(tbody, pageMiners, activeStatusIp) {
@@ -1067,11 +1167,12 @@ function statusBadge(miner) {
 }
 
 function stateDetails(miner) {
+  if (miner.loading) return ["Data collection is still running for this miner."];
   if (miner.error) return [miner.error];
   const messages = miner.data?.messages || [];
   const details = messages
     .filter((message) => message.severity === "Error" || message.severity === "Warning")
-    .map((message) => message.message || message.text || String(message))
+    .map(messageDetailText)
     .filter(Boolean);
   return details.length ? details : ["No reported errors or warnings."];
 }
@@ -1421,7 +1522,7 @@ function renderMinerMessages(miner) {
   $("minerMessages").innerHTML = messages.length ? messages.map((message) => {
     const severity = message.severity || message.level || message.kind || "Message";
     const text = message.message || message.text || message.detail || String(message);
-    return messageCard(severity, text);
+    return messageCard(severity, text, messageCode(message));
   }).join("") : `<div class="empty-list">No messages reported.</div>`;
 }
 
@@ -1457,14 +1558,43 @@ function poolLightState(pool, status) {
   return { label: "Inactive", className: "inactive" };
 }
 
-function messageCard(severity, text) {
+function messageCard(severity, text, code = null) {
   const state = messageStateClass(severity, text);
   return `
     <div class="detail-list-item message-card ${state}">
-      <strong>${escapeHtml(severity || "Message")}</strong>
+      <div class="message-card-head">
+        <strong>${escapeHtml(severity || "Message")}</strong>
+        ${code ? `<span class="message-code">Code ${escapeHtml(code)}</span>` : ""}
+      </div>
       <span>${escapeHtml(text || "-")}</span>
     </div>
   `;
+}
+
+function messageDetailText(message) {
+  const text = message.message || message.text || message.detail || String(message);
+  const code = messageCode(message);
+  return code ? `Code ${code}: ${text}` : text;
+}
+
+function messageCode(message) {
+  if (!message || typeof message !== "object") return null;
+  for (const key of ["code", "error_code", "errorCode", "message_code", "messageCode", "fault_code", "faultCode", "errno"]) {
+    const value = message[key];
+    if (isNonZeroCode(value)) return String(value).trim();
+  }
+  return null;
+}
+
+function isNonZeroCode(value) {
+  if (value === null || value === undefined || value === "") return false;
+  if (typeof value === "number") return value !== 0;
+  const text = String(value).trim();
+  if (!text) return false;
+  const normalized = text.toLowerCase();
+  if (["0", "0x0", "none", "null"].includes(normalized)) return false;
+  const numeric = Number(text);
+  return !Number.isFinite(numeric) || numeric !== 0;
 }
 
 function messageStateClass(severity, text) {
@@ -1829,7 +1959,7 @@ function openActionGroupDialog(groupId, miners = selectedMiners()) {
 
 function defaultActionForGroup(group, entries, miners = selectedMiners()) {
   if (group.id !== "mining_state") return entries[0].action;
-  const wantsMiningOn = miners.length > 0 && miners.some((miner) => miner.data?.is_mining);
+  const wantsMiningOn = miners.length > 0 && miners.some((miner) => hasCurrentMinerData(miner) && miner.data?.is_mining);
   const actionId = wantsMiningOn ? "resume" : "pause";
   return entries.find((entry) => entry.action.id === actionId)?.action || entries[0].action;
 }
@@ -1839,6 +1969,7 @@ function renderActionDialog(group, action, miners = selectedMiners()) {
   const unsupported = unsupportedFor(action, miners);
   state.pendingAction = action;
   state.pendingActionMiners = miners;
+  setActionSubmitting(false);
 
   $("actionTitle").textContent = group.label;
   $("actionSubtitle").textContent = `${supported.length} supported, ${unsupported.length} unsupported`;
@@ -1847,6 +1978,20 @@ function renderActionDialog(group, action, miners = selectedMiners()) {
   $("actionUnsupportedList").innerHTML = renderDeviceList(unsupported, "All selected miners support this action.");
   $("actionFields").innerHTML = actionFieldsHtml(action);
   $("applyAction").disabled = supported.length === 0;
+}
+
+function setActionSubmitting(submitting, message = "") {
+  state.actionSubmitting = submitting;
+  const status = $("actionStatus");
+  status.hidden = !message;
+  status.textContent = message;
+  $("applyAction").disabled = submitting || supportedFor(state.pendingAction || {}).length === 0;
+  $("applyAction").textContent = submitting ? "Sending..." : "Apply";
+  $("cancelAction").disabled = submitting;
+  $("closeAction").disabled = submitting;
+  document.querySelectorAll("#actionDialog button[data-select-action], #actionDialog input, #actionDialog select").forEach((element) => {
+    element.disabled = submitting;
+  });
 }
 
 function actionOptionsHtml(group, activeAction, miners = actionTargetMiners()) {
@@ -1990,44 +2135,44 @@ document.addEventListener("click", async (event) => {
   }
   if (button?.id === "addRange") {
     const input = $("rangeInput");
+    const nameInput = $("rangeNameInput");
     const range = input.value.trim();
+    const name = nameInput.value.trim();
     if (!range) return;
-    const previous = [...state.ranges];
-    const previousEnabled = [...state.enabledRanges];
-    const previousHosts = [...state.rangeHosts];
+    const previous = snapshotRanges();
     state.ranges.push(range);
+    state.rangeNames.push(name);
     state.enabledRanges.push(true);
     state.rangeHosts.push(0);
     renderRanges();
     try {
       await persistRanges("Range added");
       input.value = "";
+      nameInput.value = "";
       $("rangePreview").textContent = "";
     } catch (error) {
-      state.ranges = previous;
-      state.enabledRanges = previousEnabled;
-      state.rangeHosts = previousHosts;
+      restoreRanges(previous);
       renderRanges();
       toast(error.message);
     }
   }
   if (button?.dataset.removeRange !== undefined) {
-    const previous = [...state.ranges];
-    const previousEnabled = [...state.enabledRanges];
-    const previousHosts = [...state.rangeHosts];
+    const previous = snapshotRanges();
     state.ranges.splice(Number(button.dataset.removeRange), 1);
+    state.rangeNames.splice(Number(button.dataset.removeRange), 1);
     state.enabledRanges.splice(Number(button.dataset.removeRange), 1);
     state.rangeHosts.splice(Number(button.dataset.removeRange), 1);
     renderRanges();
     try {
       await persistRanges("Range removed");
     } catch (error) {
-      state.ranges = previous;
-      state.enabledRanges = previousEnabled;
-      state.rangeHosts = previousHosts;
+      restoreRanges(previous);
       renderRanges();
       toast(error.message);
     }
+  }
+  if (button?.dataset.moveRange !== undefined) {
+    await moveRange(Number(button.dataset.moveRange), Number(button.dataset.moveDirection));
   }
   if (sortableHeader) {
     const key = sortableHeader.dataset.sort;
@@ -2048,29 +2193,44 @@ document.addEventListener("click", async (event) => {
   if (button?.dataset.openAction) openActionDialog(button.dataset.openAction);
   if (button?.dataset.openActionGroup) openActionGroupDialog(button.dataset.openActionGroup);
   if (button?.dataset.historyActionGroup && state.history.miner) openActionGroupDialog(button.dataset.historyActionGroup, [state.history.miner]);
-  if (button?.dataset.selectAction) openActionDialog(button.dataset.selectAction, button.dataset.actionGroup);
+  if (button?.dataset.selectAction && !state.actionSubmitting) openActionDialog(button.dataset.selectAction, button.dataset.actionGroup);
   const historyRow = target.closest("tr[data-open-history]");
   if (historyRow && !target.closest("input, button, a, label")) await openHistory(historyRow.dataset.openHistory);
   if (button?.id === "clearSelection") clearSelection();
   if (button?.id === "applyAction") {
+    if (state.actionSubmitting) return;
     const action = state.pendingAction;
     if (!action) return;
     const supported = supportedFor(action);
-    const results = await post("/api/config", {
-      ips: supported.map((miner) => miner.ip),
-      action: action.id,
-      payload: collectPayload(),
-    });
-    const failures = results.results.filter((result) => !result.ok);
-    $("actionDialog").close();
-    state.pendingActionMiners = null;
-    toast(failures.length ? `${failures.length} action failed` : `${action.label} applied`);
+    if (!supported.length) return;
+    setActionSubmitting(true, `Command sent to ${supported.length} device${supported.length === 1 ? "" : "s"}. Waiting for response...`);
+    try {
+      const results = await post("/api/config", {
+        ips: supported.map((miner) => miner.ip),
+        action: action.id,
+        payload: collectPayload(),
+      });
+      const failures = results.results.filter((result) => !result.ok);
+      state.actionSubmitting = false;
+      $("actionDialog").close();
+      state.pendingActionMiners = null;
+      toast(failures.length ? `${failures.length} action failed` : `${action.label} applied`);
+    } catch (error) {
+      setActionSubmitting(false, `Command failed: ${error.message}`);
+      toast(error.message);
+    }
   }
 });
 
 $("actionDialog").addEventListener("close", () => {
+  if (state.actionSubmitting) return;
   state.pendingAction = null;
   state.pendingActionMiners = null;
+  setActionSubmitting(false);
+});
+
+$("actionDialog").addEventListener("cancel", (event) => {
+  if (state.actionSubmitting) event.preventDefault();
 });
 
 document.addEventListener("pointerover", (event) => {
@@ -2124,6 +2284,9 @@ document.addEventListener("change", async (event) => {
   if (target.matches("[data-range-edit]")) {
     await editRange(Number(target.dataset.rangeEdit), target.value);
   }
+  if (target.matches("[data-range-name-edit]")) {
+    await editRangeName(Number(target.dataset.rangeNameEdit), target.value);
+  }
   if (target.id === "appearanceSelect") applyAppearance(target.value);
   if (target.matches("[data-mining-state-toggle]")) {
     openActionDialog(target.checked ? "resume" : "pause", "mining_state");
@@ -2139,9 +2302,12 @@ document.addEventListener("change", async (event) => {
     renderSelectionBar();
   }
   if (target.id === "minerPageSize") {
+    const previousPageSize = state.table.pageSize;
+    const firstVisibleIndex = (state.table.page - 1) * previousPageSize;
     state.table.pageSize = Number(target.value) || 10;
-    state.table.page = 1;
-    renderTable();
+    state.table.page = Math.floor(firstVisibleIndex / state.table.pageSize) + 1;
+    clampTablePage();
+    renderTable({ forcePager: true });
   }
 });
 
@@ -2152,14 +2318,16 @@ document.addEventListener("input", (event) => {
 
 document.addEventListener("keydown", (event) => {
   const target = event.target;
-  if (!(target instanceof HTMLElement) || !target.matches("[data-range-edit]")) return;
+  if (!(target instanceof HTMLElement) || !target.matches("[data-range-edit], [data-range-name-edit]")) return;
   if (event.key === "Enter") {
     event.preventDefault();
     target.blur();
   }
   if (event.key === "Escape") {
     event.preventDefault();
-    target.value = state.ranges[Number(target.dataset.rangeEdit)] || "";
+    target.value = target.matches("[data-range-name-edit]")
+      ? state.rangeNames[Number(target.dataset.rangeNameEdit)] || ""
+      : state.ranges[Number(target.dataset.rangeEdit)] || "";
     target.blur();
   }
 });
@@ -2196,6 +2364,11 @@ $("rangeInput").addEventListener("input", async (event) => {
     if (request !== state.rangePreviewRequest) return;
     $("rangePreview").textContent = error.message;
   }
+});
+
+$("rangeSearchInput").addEventListener("input", (event) => {
+  state.rangeSearch = event.target.value;
+  renderRanges();
 });
 
 setInterval(renderSchedule, 1000);

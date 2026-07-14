@@ -31,6 +31,7 @@ class ToolkitStoreTests(IsolatedAsyncioTestCase):
             await store.save_settings(
                 AppSettings(
                     ranges=["10.0.0.1-2"],
+                    range_names=["Lab"],
                     enabled_ranges=[False],
                     live_scanning=True,
                     live_data_updates=True,
@@ -58,6 +59,7 @@ class ToolkitStoreTests(IsolatedAsyncioTestCase):
             miners = await store.load_miners()
 
             self.assertEqual(settings.ranges, ["10.0.0.1-2"])
+            self.assertEqual(settings.range_names, ["Lab"])
             self.assertEqual(settings.enabled_ranges, [False])
             self.assertTrue(settings.live_scanning)
             self.assertTrue(settings.live_data_updates)

@@ -24,6 +24,7 @@ from .miners import (
     apply_action,
     collect_data,
     get_miner,
+    revalidate_miner,
     summarize_history_point,
     stream_scan_progress_expression,
     trim_history,
@@ -36,12 +37,17 @@ STATUS_STREAM_HEARTBEAT_SECONDS = 1.0
 LIVE_RELOAD_HEARTBEAT_SECONDS = 15.0
 
 
+class MinerOfflineError(RuntimeError):
+    pass
+
+
 class ToolkitState:
     def __init__(self, store: ToolkitStore | None = None) -> None:
         self.lock = asyncio.Lock()
         self.store = store or ToolkitStore()
         self.miners: dict[str, MinerRecord] = {}
         self.ranges: list[str] = []
+        self.range_names: list[str] = []
         self.enabled_ranges: list[bool] = []
         self.live_scanning = False
         self.live_data_updates = False
@@ -58,6 +64,8 @@ class ToolkitState:
         self._next_data_at: float | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._scan_task: asyncio.Task[None] | None = None
+        self._background_data_tasks: set[asyncio.Task[None]] = set()
+        self._data_update_count = 0
         self._poll_wakeup = asyncio.Event()
         self._status_condition = asyncio.Condition()
         self._status_version = 0
@@ -92,7 +100,11 @@ class ToolkitState:
             self.live_scanning = False
             self.live_data_updates = False
 
-        tasks = [task for task in (self._scan_task, self._poll_task) if task and not task.done()]
+        tasks = [
+            task
+            for task in (self._scan_task, self._poll_task, *self._background_data_tasks)
+            if task and not task.done()
+        ]
         for task in tasks:
             task.cancel()
         if tasks:
@@ -103,6 +115,7 @@ class ToolkitState:
             now = time.monotonic()
             return jsonable_encoder({
                 "ranges": self.ranges,
+                "range_names": self._normalized_range_names_unlocked(),
                 "enabled_ranges": self._normalized_enabled_ranges_unlocked(),
                 "range_hosts": self._range_host_counts_unlocked(),
                 "live_scanning": self.live_scanning,
@@ -141,19 +154,27 @@ class ToolkitState:
             self._status_version += 1
             self._status_condition.notify_all()
 
-    async def set_ranges(self, ranges: list[str], enabled_ranges: list[bool] | None = None) -> dict[str, Any]:
+    async def set_ranges(
+        self,
+        ranges: list[str],
+        enabled_ranges: list[bool] | None = None,
+        range_names: list[str] | None = None,
+    ) -> dict[str, Any]:
         cleaned: list[str] = []
         cleaned_enabled: list[bool] = []
+        cleaned_names: list[str] = []
         for index, item in enumerate(ranges):
             expression = str(item).strip()
             if not expression:
                 continue
             cleaned.append(expression)
             cleaned_enabled.append(bool(enabled_ranges[index]) if enabled_ranges and index < len(enabled_ranges) else True)
+            cleaned_names.append(str(range_names[index]).strip() if range_names and index < len(range_names) else "")
         for expression in cleaned:
             estimate_range_size(expression)
         async with self.lock:
             self.ranges = cleaned
+            self.range_names = cleaned_names
             self.enabled_ranges = cleaned_enabled
             settings = self._settings_unlocked()
         self._wake_poll_loop()
@@ -161,6 +182,7 @@ class ToolkitState:
         await self._notify_status()
         return {
             "ranges": cleaned,
+            "range_names": cleaned_names,
             "enabled_ranges": cleaned_enabled,
             "range_hosts": self._range_host_counts(cleaned),
             "estimated_hosts": sum(estimate_range_size(item) for item in self._active_ranges(cleaned, cleaned_enabled)),
@@ -237,11 +259,15 @@ class ToolkitState:
                         raise LookupError("No supported miner responded.")
                 except Exception as exc:
                     async with self.lock:
+                        record.miner = None
+                        record.data = _current_data_for_offline_record(record.data)
+                        record.supports = {}
                         record.error = str(exc)
                     await self.store.save_miner(record)
                     continue
                 async with self.lock:
                     record.miner = miner
+                    record.data = _merge_partial_static_data(record.data, _miner_static_data(miner))
             records.append(record)
 
         await self._poll_records(records)
@@ -270,17 +296,24 @@ class ToolkitState:
                         raise LookupError("No supported miner responded.")
                 except Exception as exc:
                     async with self.lock:
+                        record.miner = None
+                        record.data = _current_data_for_offline_record(record.data)
+                        record.supports = {}
                         record.error = str(exc)
                     await self.store.save_miner(record)
                     results.append({"ip": record.ip, "ok": False, "error": str(exc)})
                     continue
                 async with self.lock:
                     record.miner = miner
+                    record.data = _merge_partial_static_data(record.data, _miner_static_data(miner))
 
             try:
+                if not await revalidate_miner(record.miner):
+                    raise MinerOfflineError("Miner did not respond to revalidation.")
                 message = await apply_action(record.miner, action, payload)
                 data, supports = await collect_data(record.miner)
                 async with self.lock:
+                    data = _merge_partial_static_data(data, _static_data_from_data(record.data))
                     record.data = data
                     record.supports = supports
                     record.error = None
@@ -292,6 +325,9 @@ class ToolkitState:
                 results.append({"ip": record.ip, "ok": True, "message": message})
             except Exception as exc:
                 async with self.lock:
+                    record.miner = None
+                    record.data = _current_data_for_offline_record(record.data)
+                    record.supports = {}
                     record.error = str(exc)
                 await self.store.save_miner(record)
                 results.append({"ip": record.ip, "ok": False, "error": str(exc)})
@@ -328,6 +364,7 @@ class ToolkitState:
     async def _scan_worker(self, ranges: list[str], concurrency_limit: int) -> None:
         sentinel = object()
         queue: asyncio.Queue[Any] = asyncio.Queue()
+        data_semaphore = asyncio.Semaphore(16)
         tasks = [
             asyncio.create_task(
                 self._enqueue_scan_results(expression, concurrency_limit, queue, sentinel),
@@ -349,7 +386,9 @@ class ToolkitState:
                     await self._record_scanned_ip(ip, miner)
                     if miner is not None:
                         record = await self._record_found_miner(miner)
-                        await self._poll_records([record])
+                        self._schedule_scan_data_poll(record, data_semaphore)
+                    else:
+                        await self._record_missing_miner(ip)
             if errors:
                 async with self.lock:
                     self.last_scan_error = "; ".join(errors)
@@ -430,7 +469,9 @@ class ToolkitState:
         async with self.lock:
             record = self.miners.get(ip) or MinerRecord(ip=ip)
             record.miner = miner
+            record.data = _merge_partial_static_data(record.data, _miner_static_data(miner))
             record.error = None
+            record.loading = True
             self.miners[ip] = record
         await self.store.save_miner(record)
         await self._notify_status()
@@ -446,6 +487,38 @@ class ToolkitState:
                 self.scan_progress["found"] += 1
             self.scan_progress["current_ip"] = ip
         await self._notify_status()
+
+    async def _record_missing_miner(self, ip: str) -> None:
+        async with self.lock:
+            record = self.miners.get(ip)
+            if record is None:
+                return
+            record.miner = None
+            record.data = _current_data_for_offline_record(record.data)
+            record.supports = {}
+            record.loading = False
+            record.error = "No supported miner responded."
+        await self.store.save_miner(record)
+        await self._notify_status()
+
+    def _schedule_scan_data_poll(self, record: MinerRecord, semaphore: asyncio.Semaphore) -> None:
+        task = asyncio.create_task(
+            self._poll_scan_record(record, semaphore),
+            name=f"miner-scan-data-{record.ip}",
+        )
+        self._background_data_tasks.add(task)
+        task.add_done_callback(self._background_data_tasks.discard)
+
+    async def _poll_scan_record(self, record: MinerRecord, semaphore: asyncio.Semaphore) -> None:
+        await self._begin_data_update()
+        try:
+            await self._poll_record(record, semaphore)
+        finally:
+            await self._end_data_update()
+        async with self.lock:
+            auto_clear = self.auto_clear_offline
+        if auto_clear:
+            await self._clear_offline_miners()
 
     async def _poll_loop(self) -> None:
         try:
@@ -498,15 +571,11 @@ class ToolkitState:
 
     async def _poll_records(self, records: Iterable[MinerRecord], limit: int = 16) -> None:
         records = list(records)
-        async with self.lock:
-            self.data_update_running = True
-        await self._notify_status()
+        await self._begin_data_update()
         try:
             await self._poll_records_unlocked(records, limit)
         finally:
-            async with self.lock:
-                self.data_update_running = False
-            await self._notify_status()
+            await self._end_data_update()
         async with self.lock:
             auto_clear = self.auto_clear_offline
         if auto_clear:
@@ -516,29 +585,48 @@ class ToolkitState:
     async def _poll_records_unlocked(self, records: list[MinerRecord], limit: int) -> None:
         await self._ensure_miner_connections(records, limit)
         semaphore = asyncio.Semaphore(limit)
+        await asyncio.gather(*(self._poll_record(record, semaphore) for record in records))
 
-        async def poll(record: MinerRecord) -> None:
-            if record.miner is None:
-                return
-            async with semaphore:
-                try:
-                    data, supports = await collect_data(record.miner)
-                except Exception as exc:
-                    async with self.lock:
-                        record.error = str(exc)
-                    await self.store.save_miner(record)
-                    return
-                point = summarize_history_point(data)
+    async def _poll_record(self, record: MinerRecord, semaphore: asyncio.Semaphore) -> None:
+        if record.miner is None:
+            return
+        async with semaphore:
+            try:
+                if not await revalidate_miner(record.miner):
+                    raise MinerOfflineError("Miner did not respond to revalidation.")
+                data, supports = await collect_data(record.miner)
+            except Exception as exc:
                 async with self.lock:
-                    record.data = data
-                    record.supports = supports
-                    record.error = None
-                    record.last_seen = time.time()
-                    record.history.append(point)
-                    trim_history(record.history)
-                await self._persist_record(record, point)
+                    record.miner = None
+                    record.data = _current_data_for_offline_record(record.data)
+                    record.supports = {}
+                    record.error = str(exc)
+                    record.loading = False
+                await self.store.save_miner(record)
+                return
+            async with self.lock:
+                data = _merge_partial_static_data(data, _static_data_from_data(record.data))
+                point = summarize_history_point(data)
+                record.data = data
+                record.supports = supports
+                record.error = None
+                record.loading = False
+                record.last_seen = time.time()
+                record.history.append(point)
+                trim_history(record.history)
+            await self._persist_record(record, point)
 
-        await asyncio.gather(*(poll(record) for record in records))
+    async def _begin_data_update(self) -> None:
+        async with self.lock:
+            self._data_update_count += 1
+            self.data_update_running = True
+        await self._notify_status()
+
+    async def _end_data_update(self) -> None:
+        async with self.lock:
+            self._data_update_count = max(0, self._data_update_count - 1)
+            self.data_update_running = self._data_update_count > 0
+        await self._notify_status()
 
     async def _ensure_miner_connections(self, records: Iterable[MinerRecord], limit: int = 16) -> None:
         semaphore = asyncio.Semaphore(limit)
@@ -558,6 +646,7 @@ class ToolkitState:
                     return
                 async with self.lock:
                     record.miner = miner
+                    record.data = _merge_partial_static_data(record.data, _miner_static_data(miner))
                     record.error = None
 
         await asyncio.gather(*(connect(record) for record in records))
@@ -570,6 +659,7 @@ class ToolkitState:
         miners = await self.store.load_miners()
         async with self.lock:
             self.ranges = settings.ranges
+            self.range_names = self._normalized_range_names(settings.ranges, settings.range_names)
             self.enabled_ranges = self._normalized_enabled_ranges(settings.ranges, settings.enabled_ranges)
             self.live_scanning = settings.live_scanning
             self.live_data_updates = settings.live_data_updates
@@ -589,7 +679,7 @@ class ToolkitState:
         async with self.lock:
             ips = [
                 ip for ip, record in self.miners.items()
-                if record.error or not record.data or not record.last_seen
+                if not record.loading and (record.error or not record.data or not record.last_seen)
             ]
             for ip in ips:
                 self.miners.pop(ip, None)
@@ -598,6 +688,7 @@ class ToolkitState:
     def _settings_unlocked(self) -> AppSettings:
         return AppSettings(
             ranges=list(self.ranges),
+            range_names=self._normalized_range_names_unlocked(),
             enabled_ranges=self._normalized_enabled_ranges_unlocked(),
             live_scanning=self.live_scanning,
             live_data_updates=self.live_data_updates,
@@ -617,6 +708,9 @@ class ToolkitState:
     def _normalized_enabled_ranges_unlocked(self) -> list[bool]:
         return self._normalized_enabled_ranges(self.ranges, self.enabled_ranges)
 
+    def _normalized_range_names_unlocked(self) -> list[str]:
+        return self._normalized_range_names(self.ranges, self.range_names)
+
     def _range_host_counts_unlocked(self) -> list[int]:
         return self._range_host_counts(self.ranges)
 
@@ -633,6 +727,13 @@ class ToolkitState:
     def _active_ranges(ranges: list[str], enabled_ranges: list[bool]) -> list[str]:
         enabled = ToolkitState._normalized_enabled_ranges(ranges, enabled_ranges)
         return [expression for expression, is_enabled in zip(ranges, enabled, strict=False) if is_enabled]
+
+    @staticmethod
+    def _normalized_range_names(ranges: list[str], range_names: list[str]) -> list[str]:
+        return [
+            str(range_names[index]).strip() if index < len(range_names) else ""
+            for index, _ in enumerate(ranges)
+        ]
 
     @staticmethod
     def _normalized_enabled_ranges(ranges: list[str], enabled_ranges: list[bool]) -> list[bool]:
@@ -693,7 +794,11 @@ def create_app(state: ToolkitState | None = None) -> FastAPI:
     async def set_ranges(request: Request) -> dict[str, Any]:
         payload = await request.json()
         try:
-            return await app.state.toolkit.set_ranges(payload.get("ranges", []), payload.get("enabled_ranges"))
+            return await app.state.toolkit.set_ranges(
+                payload.get("ranges", []),
+                payload.get("enabled_ranges"),
+                payload.get("range_names"),
+            )
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -888,6 +993,50 @@ def _coerce_appearance(value: Any) -> str:
     if appearance not in {"system", "light", "dark"}:
         raise ValueError("appearance must be system, light, or dark")
     return appearance
+
+
+def _miner_static_data(miner: Any) -> dict[str, Any]:
+    device_info = {
+        key: value
+        for key, value in {
+            "make": _static_value(getattr(miner, "make", None)),
+            "model": _static_value(getattr(miner, "model", None)),
+            "firmware": _static_value(getattr(miner, "firmware", None)),
+        }.items()
+        if value not in (None, "")
+    }
+    return {"device_info": device_info} if device_info else {}
+
+
+def _merge_partial_static_data(current: dict[str, Any], partial: dict[str, Any]) -> dict[str, Any]:
+    if not partial:
+        return current
+    merged = dict(current)
+    if isinstance(partial.get("device_info"), dict):
+        existing = merged.get("device_info") if isinstance(merged.get("device_info"), dict) else {}
+        merged["device_info"] = {**partial["device_info"], **existing}
+    return merged
+
+
+def _static_data_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    device_info = data.get("device_info")
+    return {"device_info": device_info} if isinstance(device_info, dict) else {}
+
+
+def _current_data_for_offline_record(data: dict[str, Any]) -> dict[str, Any]:
+    return _static_data_from_data(data)
+
+
+def _static_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str | int | float | bool):
+        return value
+    if hasattr(value, "value") and isinstance(value.value, str | int | float | bool):
+        return value.value
+    if hasattr(value, "name"):
+        return str(value.name)
+    return str(value)
 
 
 def _seconds_until(deadline: float | None, now: float) -> int | None:

@@ -57,9 +57,19 @@
               Range expression
               <input id="rangeInput" placeholder="192.168.1.1-254" spellcheck="false" />
             </label>
+            <label>
+              Name
+              <input id="rangeNameInput" placeholder="Building A" spellcheck="false" />
+            </label>
             <button id="addRange" class="btn btn-primary">Add range</button>
           </div>
           <div id="rangePreview" class="preview"></div>
+          <div class="range-tools">
+            <label>
+              Search ranges
+              <input id="rangeSearchInput" placeholder="Name or range" spellcheck="false" />
+            </label>
+          </div>
           <div id="rangeList" class="range-table-wrap"></div>
         </div>
       </section>
@@ -257,7 +267,7 @@
             <h2 id="actionTitle">Action</h2>
             <p id="actionSubtitle"></p>
           </div>
-          <button class="btn" value="cancel" aria-label="Close">Close</button>
+          <button id="closeAction" class="btn" value="cancel" aria-label="Close">Close</button>
         </div>
         <div id="actionOptions"></div>
         <div class="action-support-grid">
@@ -278,8 +288,9 @@
             <label>Password<input id="authPass" type="password" autocomplete="current-password" /></label>
           </div>
         </details>
+        <div id="actionStatus" class="action-status" role="status" hidden></div>
         <div class="dialog-actions">
-          <button class="btn" value="cancel">Cancel</button>
+          <button id="cancelAction" class="btn" value="cancel">Cancel</button>
           <button id="applyAction" class="btn btn-primary" type="button">Apply</button>
         </div>
       </form>
