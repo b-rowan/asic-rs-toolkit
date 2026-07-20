@@ -205,6 +205,11 @@ summary:focus-visible {
   color: var(--text-contrast);
 }
 
+.btn.active {
+  background: var(--intent-success-10);
+  color: var(--intent-success);
+}
+
 .rail {
   min-height: 100vh;
   padding: 24px 16px;
@@ -471,6 +476,14 @@ label,
 }
 
 #miners.page.active {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#ipReports.page.active {
   display: flex;
   min-height: 0;
   flex: 1 1 auto;
@@ -990,6 +1003,23 @@ td strong {
   border-top: 1px solid var(--border-10);
   padding: 10px 14px;
   background: var(--surface-2);
+}
+
+.ip-report-panel {
+  flex: 1 1 auto;
+}
+
+.ip-report-table {
+  min-width: 680px;
+}
+
+.inline-alert {
+  border-top: 1px solid var(--border-10);
+  padding: 10px 18px;
+  background: var(--intent-critical-10);
+  color: var(--intent-critical);
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .pager-count {

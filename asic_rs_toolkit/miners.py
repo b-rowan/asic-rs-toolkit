@@ -131,6 +131,19 @@ async def get_miner(ip: str) -> Miner | None:
     return await MinerFactory().get_miner(ip)
 
 
+async def listen_ip_reports() -> AsyncIterator[str]:
+    try:
+        from pyasic_rs import MinerListener
+    except ImportError as exc:
+        raise RuntimeError("Installed pyasic_rs does not expose MinerListener.") from exc
+
+    reports = MinerListener().listen_ip_only()
+    if isawaitable(reports):
+        reports = await reports
+    async for ip in reports:
+        yield str(ip)
+
+
 async def revalidate_miner(miner: Miner) -> bool:
     revalidate = getattr(miner, "revalidate", None)
     if revalidate is None:

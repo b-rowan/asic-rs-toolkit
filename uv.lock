@@ -74,7 +74,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.21" },
     { name = "fastapi", specifier = ">=0.116" },
     { name = "platformdirs", specifier = ">=4.3" },
-    { name = "pyasic-rs", git = "https://github.com/b-rowan/asic-rs.git?rev=add-revalidate-trait" },
+    { name = "pyasic-rs", git = "https://github.com/256foundation/asic-rs.git?rev=refs%2Fpull%2F316%2Fhead" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.14" },
     { name = "pywebview", extras = ["qt"], specifier = ">=6.2.1" },
@@ -245,7 +245,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/f2/cf/77d3e19b7fabd0389
 [[package]]
 name = "pyasic-rs"
 version = "0.7.2"
-source = { git = "https://github.com/b-rowan/asic-rs.git?rev=add-revalidate-trait#f9928dff990eeaf88682bae5ddd44cdd4a75bfad" }
+source = { git = "https://github.com/256foundation/asic-rs.git?rev=refs%2Fpull%2F316%2Fhead#147fece0e272ae6fe4f925ad99489deac9f6ddf4" }
 dependencies = [
     { name = "pydantic" },
 ]

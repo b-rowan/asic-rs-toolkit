@@ -70,6 +70,11 @@ async def fake_get_miner(ip: str):
     return FakeMiner(ip)
 
 
+async def fake_ip_reports_once():
+    yield "10.0.0.2"
+    await asyncio.Event().wait()
+
+
 async def fake_get_offline_miner(ip: str):
     await asyncio.sleep(0)
     return FakeOfflineMiner(ip)
@@ -87,6 +92,15 @@ async def wait_for_status(state: ToolkitState, predicate, attempts: int = 50):
             return status
         await asyncio.sleep(0.01)
     return await state.status()
+
+
+async def wait_for_ip_report(state: ToolkitState, predicate, attempts: int = 50):
+    for _ in range(attempts):
+        status = await state.ip_report_status()
+        if predicate(status):
+            return status
+        await asyncio.sleep(0.01)
+    return await state.ip_report_status()
 
 
 class ToolkitScanTests(IsolatedAsyncioTestCase):
@@ -409,6 +423,43 @@ class ToolkitScanTests(IsolatedAsyncioTestCase):
             self.assertEqual(miner["data"], {"device_info": {"make": "Acme", "model": "S1", "firmware": "Stock"}})
             self.assertEqual(miner["error"], "Miner did not respond to revalidation.")
             self.assertFalse(miner["loading"])
+
+    async def test_ip_report_listener_records_and_identifies_reporting_miners(self) -> None:
+        lookup_started = asyncio.Event()
+        release_lookup = asyncio.Event()
+
+        async def delayed_get_miner(ip: str):
+            lookup_started.set()
+            await release_lookup.wait()
+            return FakeMiner(ip)
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = ToolkitState(ToolkitStore(Path(directory) / "toolkit.sqlite3"))
+            await state.start()
+
+            with (
+                patch("asic_rs_toolkit.server.listen_ip_reports", fake_ip_reports_once),
+                patch("asic_rs_toolkit.server.get_miner", delayed_get_miner),
+            ):
+                await state.start_ip_report_listener()
+                report = await wait_for_ip_report(
+                    state,
+                    lambda item: item["running"] and item["miners"] and lookup_started.is_set(),
+                )
+
+                self.assertTrue(lookup_started.is_set())
+                self.assertTrue(report["running"])
+                self.assertEqual(report["miners"], [{"ip": "10.0.0.2"}])
+
+                release_lookup.set()
+                report = await wait_for_ip_report(state, lambda item: item["miners"][0].get("make") == "Acme")
+
+            await state.stop()
+
+            self.assertEqual(report["miners"][0]["ip"], "10.0.0.2")
+            self.assertEqual(report["miners"][0]["make"], "Acme")
+            self.assertEqual(report["miners"][0]["model"], "S1")
+            self.assertEqual(report["miners"][0]["firmware"], "Stock")
 
     async def test_scan_does_not_add_missing_unknown_miner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -21,6 +21,7 @@
       </div>
       <nav>
         <button class="nav active" data-page="miners">Home</button>
+        <button class="nav" data-page="ipReports">Listener</button>
         <button class="nav" data-page="ranges">IP Ranges</button>
         <button class="nav" data-page="settings">Settings</button>
       </nav>
@@ -104,6 +105,32 @@
             </table>
           </div>
           <div id="minerPager" class="table-pager"></div>
+        </div>
+      </section>
+
+      <section id="ipReports" class="page">
+        <div class="panel table-panel ip-report-panel">
+          <div class="panel-head">
+            <div>
+              <h2>IP Report Listener</h2>
+              <span id="ipReportCount">0 reports</span>
+            </div>
+            <button id="ipReportToggle" class="btn btn-primary" type="button">Start listening</button>
+          </div>
+          <div id="ipReportError" class="inline-alert" hidden></div>
+          <div class="table-wrap">
+            <table class="ip-report-table">
+              <thead>
+                <tr>
+                  <th>IP</th>
+                  <th>Make</th>
+                  <th>Model</th>
+                  <th>Firmware</th>
+                </tr>
+              </thead>
+              <tbody id="ipReportRows"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 

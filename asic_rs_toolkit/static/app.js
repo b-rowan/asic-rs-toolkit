@@ -6,6 +6,8 @@ const state = {
   miners: [],
   minerTotal: 0,
   minerSummary: { total: 0, mining: 0, issues: 0, hashrate_value: 0, hashrate_unit: "", wattage: 0, average_temperature: null },
+  ipReports: { running: false, error: null, miners: [] },
+  ipReportRefreshing: false,
   statusSocket: null,
   statusSocketPath: "",
   statusReconnectTimer: null,
@@ -48,6 +50,7 @@ const state = {
 
 const pages = {
   ranges: ["IP Ranges", "Add octet ranges using a-b.c-d.e-f.g-h notation."],
+  ipReports: ["Listener", "Listen for miner IP reports and identify reporting devices."],
   miners: ["Home", "Sort, select, inspect status, and apply supported actions."],
   settings: ["Settings", "Configure automatic scanning and table cleanup."],
   history: ["Miner History", "Recent operating data for the selected miner."],
@@ -155,6 +158,7 @@ function showPage(page) {
   $("pageSubtitle").textContent = pages[page].at(1);
   renderSelectionBar();
   if (page !== "history") $("minerActionBar").hidden = true;
+  if (page === "ipReports") refreshIpReports().catch((error) => toast(error.message));
 }
 
 async function refresh(expectedPath = statusPath()) {
@@ -298,6 +302,7 @@ function renderAll({ updateHistoryCharts = true } = {}) {
   renderSettings();
   renderHomeStats();
   renderTable();
+  renderIpReports();
   if (state.page === "history" && state.history.ip) renderHistory({ updateCharts: updateHistoryCharts });
   renderSelectionBar();
   renderSchedule();
@@ -1151,6 +1156,54 @@ function renderTablePager(total, pageCount) {
   if (pager.dataset.renderHash === html) return;
   pager.dataset.renderHash = html;
   pager.innerHTML = html;
+}
+
+async function refreshIpReports() {
+  if (state.ipReportRefreshing) return;
+  state.ipReportRefreshing = true;
+  try {
+    applyIpReports(await api("/api/ip-reports"));
+  } finally {
+    state.ipReportRefreshing = false;
+  }
+}
+
+function applyIpReports(data) {
+  state.ipReports = {
+    running: !!data.running,
+    error: data.error || null,
+    miners: data.miners || [],
+  };
+  renderIpReports();
+}
+
+function renderIpReports() {
+  if (!$("ipReportRows")) return;
+  const reports = state.ipReports.miners || [];
+  const running = !!state.ipReports.running;
+  const error = state.ipReports.error;
+  $("ipReportToggle").textContent = running ? "Stop listening" : "Start listening";
+  $("ipReportToggle").classList.toggle("active", running);
+  $("ipReportCount").textContent = `${reports.length} report${reports.length === 1 ? "" : "s"}`;
+  $("ipReportError").hidden = !error;
+  $("ipReportError").textContent = error || "";
+  $("ipReportRows").innerHTML = reports.length ? reports.map((miner) => `
+    <tr>
+      <td><strong>${escapeHtml(miner.ip)}</strong></td>
+      <td>${escapeHtml(miner.make || "-")}</td>
+      <td>${escapeHtml(miner.model || "-")}</td>
+      <td>${escapeHtml(miner.firmware || "-")}</td>
+    </tr>
+  `).join("") : `
+    <tr class="empty-row">
+      <td colspan="4">
+        <div class="table-empty">
+          <strong>No IP reports heard</strong>
+          <span>Start listening, then wait for miners to announce themselves.</span>
+        </div>
+      </td>
+    </tr>
+  `;
 }
 
 function tablePageCount(total = state.minerTotal) {
@@ -2167,6 +2220,15 @@ document.addEventListener("click", async (event) => {
     await post("/api/scan", {});
     toast("Scan started");
   }
+  if (button?.id === "ipReportToggle") {
+    try {
+      const running = !state.ipReports.running;
+      applyIpReports(await post("/api/ip-reports", { running }));
+      toast(running ? "IP report listener started" : "IP report listener stopped");
+    } catch (error) {
+      toast(error.message);
+    }
+  }
   if (button?.id === "saveSettings") {
     try {
       await saveSettings();
@@ -2413,6 +2475,11 @@ $("rangeSearchInput").addEventListener("input", (event) => {
 });
 
 setInterval(renderSchedule, 1000);
+setInterval(() => {
+  if (state.page === "ipReports" || state.ipReports.running) {
+    refreshIpReports().catch((error) => toast(error.message));
+  }
+}, 2000);
 connectStatusStream();
 connectLiveReload();
 

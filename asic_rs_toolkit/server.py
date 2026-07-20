@@ -27,6 +27,7 @@ from .miners import (
     apply_action,
     collect_data,
     get_miner,
+    listen_ip_reports,
     revalidate_miner,
     summarize_history_point,
     stream_scan_progress_expressions,
@@ -73,10 +74,14 @@ class ToolkitState:
         self.background_data_concurrency_limit = DEFAULT_BACKGROUND_DATA_CONCURRENCY
         self.auto_clear_offline = False
         self.appearance = "system"
+        self.ip_report_running = False
+        self.ip_report_error: str | None = None
+        self.ip_reports: dict[str, dict[str, Any]] = {}
         self._next_scan_at: float | None = None
         self._next_data_at: float | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._scan_task: asyncio.Task[None] | None = None
+        self._ip_report_task: asyncio.Task[None] | None = None
         self._background_data_dispatcher: asyncio.Task[None] | None = None
         self._background_data_tasks: set[asyncio.Task[None]] = set()
         self._background_data_queue: asyncio.Queue[MinerRecord] = asyncio.Queue()
@@ -123,6 +128,7 @@ class ToolkitState:
             task
             for task in (
                 self._scan_task,
+                self._ip_report_task,
                 self._poll_task,
                 self._db_write_task,
                 self._background_data_dispatcher,
@@ -389,6 +395,78 @@ class ToolkitState:
             await self._clear_offline_miners()
         await self._notify_status()
         return {"results": results}
+
+    async def ip_report_status(self) -> dict[str, Any]:
+        async with self.lock:
+            return jsonable_encoder({
+                "running": self.ip_report_running,
+                "error": self.ip_report_error,
+                "miners": list(self.ip_reports.values()),
+            })
+
+    async def toggle_ip_report_listener(self, running: bool) -> dict[str, Any]:
+        if running:
+            await self.start_ip_report_listener()
+        else:
+            await self.stop_ip_report_listener()
+        return await self.ip_report_status()
+
+    async def start_ip_report_listener(self) -> None:
+        async with self.lock:
+            if self.ip_report_running:
+                return
+            self.ip_report_running = True
+            self.ip_report_error = None
+            self._ip_report_task = asyncio.create_task(
+                self._run_ip_report_listener(),
+                name="ip-report-listener",
+            )
+        await self._notify_status()
+
+    async def stop_ip_report_listener(self) -> None:
+        async with self.lock:
+            task = self._ip_report_task
+            self.ip_report_running = False
+            self._ip_report_task = None
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await self._notify_status()
+
+    async def _run_ip_report_listener(self) -> None:
+        current_task = asyncio.current_task()
+        try:
+            async for ip in listen_ip_reports():
+                await self._record_ip_report(ip)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            async with self.lock:
+                self.ip_report_error = str(exc)
+        finally:
+            async with self.lock:
+                if self._ip_report_task is current_task:
+                    self._ip_report_task = None
+                self.ip_report_running = False
+            await self._notify_status()
+
+    async def _record_ip_report(self, ip: str) -> None:
+        ip = str(ip)
+        async with self.lock:
+            self.ip_reports[ip] = {**self.ip_reports.get(ip, {}), "ip": ip}
+        await self._notify_status()
+
+        try:
+            miner = await get_miner(ip)
+            if miner is None:
+                raise LookupError("No supported miner responded.")
+            row = _ip_report_row(ip, miner)
+        except Exception as exc:
+            row = {"ip": ip, "make": "-", "model": "-", "firmware": "-", "error": str(exc)}
+
+        async with self.lock:
+            self.ip_reports[ip] = row
+        await self._notify_status()
 
     async def history(self, ip: str) -> dict[str, Any]:
         async with self.lock:
@@ -938,6 +1016,15 @@ def create_app(state: ToolkitState | None = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Miner not found") from exc
 
+    @app.get("/api/ip-reports")
+    async def ip_reports() -> dict[str, Any]:
+        return await app.state.toolkit.ip_report_status()
+
+    @app.post("/api/ip-reports")
+    async def toggle_ip_reports(request: Request) -> dict[str, Any]:
+        payload = await request.json()
+        return await app.state.toolkit.toggle_ip_report_listener(bool(payload.get("running")))
+
     @app.get("/api/range-preview")
     async def range_preview(range: str) -> dict[str, Any]:
         try:
@@ -1184,6 +1271,15 @@ def _miner_static_data(miner: Any) -> dict[str, Any]:
         if value not in (None, "")
     }
     return {"device_info": device_info} if device_info else {}
+
+
+def _ip_report_row(ip: str, miner: Any) -> dict[str, str]:
+    return {
+        "ip": ip,
+        "make": _static_value(getattr(miner, "make", None)) or "-",
+        "model": _static_value(getattr(miner, "model", None)) or "-",
+        "firmware": _static_value(getattr(miner, "firmware", None)) or "-",
+    }
 
 
 def _merge_partial_static_data(current: dict[str, Any], partial: dict[str, Any]) -> dict[str, Any]:
