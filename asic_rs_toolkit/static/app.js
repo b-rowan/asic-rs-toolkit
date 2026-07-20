@@ -4,6 +4,11 @@ const state = {
   enabledRanges: [],
   rangeHosts: [],
   miners: [],
+  minerTotal: 0,
+  minerSummary: { total: 0, mining: 0, issues: 0, hashrate_value: 0, hashrate_unit: "", wattage: 0, average_temperature: null },
+  statusSocket: null,
+  statusSocketPath: "",
+  statusReconnectTimer: null,
   selected: new Set(),
   sort: { key: "ip", direction: "asc" },
   table: { page: 1, pageSize: 10 },
@@ -20,6 +25,7 @@ const state = {
     scan_interval: 30,
     scan_concurrency_limit: 1000,
     data_update_interval: 30,
+    background_data_concurrency_limit: 250,
     auto_clear_offline: false,
     appearance: "system",
   },
@@ -151,9 +157,32 @@ function showPage(page) {
   if (page !== "history") $("minerActionBar").hidden = true;
 }
 
-async function refresh() {
-  const data = await api("/api/status");
+async function refresh(expectedPath = statusPath()) {
+  const data = await api(expectedPath);
+  if (expectedPath !== statusPath()) return;
   applyStatus(data);
+}
+
+function statusParams() {
+  return new URLSearchParams({
+    page: String(state.table.page),
+    page_size: String(state.table.pageSize),
+    sort_key: state.sort.key,
+    sort_direction: state.sort.direction,
+  });
+}
+
+function statusPath() {
+  return `/api/status?${statusParams()}`;
+}
+
+function statusStreamPath() {
+  return `/api/status-stream?${statusParams()}`;
+}
+
+async function reloadMinerPage() {
+  connectStatusStream();
+  await refresh();
 }
 
 function applyStatus(data) {
@@ -166,11 +195,19 @@ function applyStatus(data) {
     state.rangeHosts = normalizeRangeHosts(data.range_hosts || [], state.ranges);
   }
   state.miners = data.miners || [];
+  state.minerSummary = data.miner_summary || state.minerSummary;
+  state.minerTotal = data.miner_page?.total ?? state.miners.length;
+  if (data.miner_page) {
+    state.table.page = data.miner_page.page || state.table.page;
+    state.table.pageSize = data.miner_page.page_size || state.table.pageSize;
+    state.sort.key = data.miner_page.sort_key || state.sort.key;
+    state.sort.direction = data.miner_page.sort_direction || state.sort.direction;
+  }
   if (state.history.ip) {
     const activeMiner = state.miners.find((miner) => miner.ip === state.history.ip);
     if (activeMiner) state.history.miner = activeMiner;
   }
-  clampTablePage();
+  clampTablePage(state.minerTotal);
   const historyChanged = mergeActiveHistoryPoint();
   if (!state.settingsDirty) state.settings = data.settings || state.settings;
   if (state.appliedAppearance !== state.settings.appearance) applyAppearance(state.settings.appearance);
@@ -708,20 +745,19 @@ function numericDuration(value) {
 }
 
 function renderHomeStats() {
-  const miners = state.miners;
-  const currentMiners = miners.filter(hasCurrentMinerData);
-  const totalWatts = currentMiners.reduce((sum, miner) => sum + numeric(miner.data?.wattage), 0);
-  const temps = currentMiners.map((miner) => numeric(miner.data?.average_temperature)).filter((value) => value > 0);
-  const hashrates = currentMiners.map((miner) => numeric(miner.data?.hashrate?.value)).filter((value) => value > 0);
-  const unit = currentMiners.find((miner) => miner.data?.hashrate?.unit)?.data.hashrate.unit || "";
-  const mining = currentMiners.filter((miner) => miner.data?.is_mining).length;
-  const issues = miners.filter((miner) => minerErrors(miner) > 0).length;
+  const summary = state.minerSummary || {};
+  const totalWatts = numeric(summary.wattage);
+  const averageTemperature = numeric(summary.average_temperature);
+  const hashrate = numeric(summary.hashrate_value);
+  const unit = summary.hashrate_unit || "";
+  const mining = numeric(summary.mining);
+  const issues = numeric(summary.issues);
   $("homeStats").innerHTML = [
-    metricCard("Miners", number(miners.length), `${mining} mining`),
+    metricCard("Miners", number(summary.total ?? state.minerTotal), `${number(mining)} mining`),
     metricCard("Issues", number(issues), issues ? "Needs attention" : "No active issues"),
-    metricCard("Hashrate", hashrates.length ? `${number(hashrates.reduce((sum, value) => sum + value, 0))} ${unit}`.trim() : "-", "Reported total"),
+    metricCard("Hashrate", hashrate ? `${number(hashrate)} ${unit}`.trim() : "-", "Reported total"),
     metricCard("Power", totalWatts ? `${number(totalWatts)} W` : "-", "Reported draw"),
-    metricCard("Average Temperature", temps.length ? `${number(temps.reduce((sum, value) => sum + value, 0) / temps.length)} °C` : "-", "Online miners"),
+    metricCard("Average Temperature", averageTemperature ? `${number(averageTemperature)} °C` : "-", "Online miners"),
   ].join("");
 }
 
@@ -926,6 +962,7 @@ function renderSettings(force = false) {
   $("scanIntervalInput").value = state.settings.scan_interval ?? 30;
   $("scanConcurrencyLimitInput").value = state.settings.scan_concurrency_limit ?? 1000;
   $("dataUpdateIntervalInput").value = state.settings.data_update_interval ?? 30;
+  $("backgroundDataConcurrencyLimitInput").value = state.settings.background_data_concurrency_limit ?? 250;
   $("autoClearOfflineToggle").checked = !!state.settings.auto_clear_offline;
   $("appearanceSelect").value = state.settings.appearance || "system";
   applyAppearance($("appearanceSelect").value);
@@ -935,10 +972,12 @@ async function saveSettings() {
   const scanInterval = Number($("scanIntervalInput").value);
   const scanConcurrencyLimit = Number($("scanConcurrencyLimitInput").value);
   const dataUpdateInterval = Number($("dataUpdateIntervalInput").value);
+  const backgroundDataConcurrencyLimit = Number($("backgroundDataConcurrencyLimitInput").value);
   const payload = {
     scan_interval: scanInterval,
     scan_concurrency_limit: scanConcurrencyLimit,
     data_update_interval: dataUpdateInterval,
+    background_data_concurrency_limit: backgroundDataConcurrencyLimit,
     auto_clear_offline: $("autoClearOfflineToggle").checked,
     appearance: $("appearanceSelect").value,
   };
@@ -980,13 +1019,13 @@ function destroyHistoryCharts() {
 
 function renderTable({ forcePager = false } = {}) {
   const miners = sortedMiners();
-  clampTablePage(miners.length);
-  const pageCount = tablePageCount(miners.length);
+  clampTablePage(state.minerTotal);
+  const pageCount = tablePageCount(state.minerTotal);
   const pageMiners = currentPageMiners(miners);
   const tbody = $("minerRows");
   const activeStatusIp = state.activeStatePopover?.wrapper.closest("tr[data-open-history]")?.dataset.openHistory || null;
   updateSortHeaders();
-  $("selectionCount").textContent = tableSummary(miners.length, pageMiners.length);
+  $("selectionCount").textContent = tableSummary(state.minerTotal, pageMiners.length);
   $("selectAll").checked = pageMiners.length > 0 && pageMiners.every((miner) => state.selected.has(miner.ip));
   if (pageMiners.length) {
     renderMinerRows(tbody, pageMiners, activeStatusIp);
@@ -1000,7 +1039,7 @@ function renderTable({ forcePager = false } = {}) {
   } else if (state.activeStatePopover) {
     hideStatePopover();
   }
-  if (forcePager || !isEditingTablePager()) renderTablePager(miners.length, pageCount);
+  if (forcePager || !isEditingTablePager()) renderTablePager(state.minerTotal, pageCount);
 }
 
 function renderMinerRows(tbody, pageMiners, activeStatusIp) {
@@ -1075,12 +1114,11 @@ function emptyMinerRow() {
 }
 
 function sortedMiners() {
-  return [...state.miners].sort(sortMiner);
+  return [...state.miners];
 }
 
 function currentPageMiners(miners = sortedMiners()) {
-  const start = miners.length ? (state.table.page - 1) * state.table.pageSize : 0;
-  return miners.slice(start, start + state.table.pageSize);
+  return miners;
 }
 
 function tableSummary(total, visible) {
@@ -1095,7 +1133,7 @@ function renderTablePager(total, pageCount) {
   const pager = $("minerPager");
   if (!pager) return;
   const page = state.table.page;
-  pager.innerHTML = `
+  const html = `
     <div class="pager-count">${total ? `Page ${page} of ${pageCount}` : "No miners"}</div>
     <label class="pager-size">
       Rows
@@ -1110,13 +1148,16 @@ function renderTablePager(total, pageCount) {
       <button class="icon-btn" data-page-step="last" aria-label="Last page" title="Last page" ${page >= pageCount ? "disabled" : ""}>&gt;|</button>
     </div>
   `;
+  if (pager.dataset.renderHash === html) return;
+  pager.dataset.renderHash = html;
+  pager.innerHTML = html;
 }
 
-function tablePageCount(total = state.miners.length) {
+function tablePageCount(total = state.minerTotal) {
   return Math.max(1, Math.ceil(total / state.table.pageSize));
 }
 
-function clampTablePage(total = state.miners.length) {
+function clampTablePage(total = state.minerTotal) {
   state.table.page = Math.min(Math.max(1, state.table.page), tablePageCount(total));
 }
 
@@ -2179,7 +2220,7 @@ document.addEventListener("click", async (event) => {
     state.sort.direction = state.sort.key === key && state.sort.direction === "asc" ? "desc" : "asc";
     state.sort.key = key;
     state.table.page = 1;
-    renderTable();
+    await reloadMinerPage();
   }
   if (button?.dataset.pageStep) {
     const pageCount = tablePageCount();
@@ -2188,7 +2229,7 @@ document.addEventListener("click", async (event) => {
     if (button.dataset.pageStep === "next") state.table.page += 1;
     if (button.dataset.pageStep === "last") state.table.page = pageCount;
     clampTablePage();
-    renderTable();
+    await reloadMinerPage();
   }
   if (button?.dataset.openAction) openActionDialog(button.dataset.openAction);
   if (button?.dataset.openActionGroup) openActionGroupDialog(button.dataset.openActionGroup);
@@ -2307,7 +2348,7 @@ document.addEventListener("change", async (event) => {
     state.table.pageSize = Number(target.value) || 10;
     state.table.page = Math.floor(firstVisibleIndex / state.table.pageSize) + 1;
     clampTablePage();
-    renderTable({ forcePager: true });
+    await reloadMinerPage();
   }
 });
 
@@ -2386,8 +2427,22 @@ function connectLiveReload() {
 
 function connectStatusStream() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${protocol}://${window.location.host}/api/status-stream`);
+  const path = statusStreamPath();
+  if (
+    state.statusSocket
+    && state.statusSocketPath === path
+    && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.statusSocket.readyState)
+  ) return;
+  if (state.statusSocket) {
+    const previous = state.statusSocket;
+    state.statusSocket = null;
+    previous.close();
+  }
+  state.statusSocketPath = path;
+  const socket = new WebSocket(`${protocol}://${window.location.host}${path}`);
+  state.statusSocket = socket;
   socket.addEventListener("message", (event) => {
+    if (state.statusSocket !== socket || state.statusSocketPath !== path) return;
     try {
       applyStatus(JSON.parse(event.data));
     } catch (error) {
@@ -2395,6 +2450,8 @@ function connectStatusStream() {
     }
   });
   socket.addEventListener("close", () => {
+    if (state.statusSocket !== socket) return;
+    state.statusSocket = null;
     refresh().catch((error) => toast(error.message));
     setTimeout(connectStatusStream, 1000);
   });

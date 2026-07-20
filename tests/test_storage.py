@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import time
 from pathlib import Path
@@ -38,6 +39,7 @@ class ToolkitStoreTests(IsolatedAsyncioTestCase):
                     scan_interval=15,
                     scan_concurrency_limit=42,
                     data_update_interval=20,
+                    background_data_concurrency_limit=33,
                     auto_clear_offline=True,
                     appearance="dark",
                 )
@@ -66,6 +68,7 @@ class ToolkitStoreTests(IsolatedAsyncioTestCase):
             self.assertEqual(settings.scan_interval, 15)
             self.assertEqual(settings.scan_concurrency_limit, 42)
             self.assertEqual(settings.data_update_interval, 20)
+            self.assertEqual(settings.background_data_concurrency_limit, 33)
             self.assertTrue(settings.auto_clear_offline)
             self.assertEqual(settings.appearance, "dark")
             self.assertEqual(miners["10.0.0.2"].data["is_mining"], True)
@@ -89,3 +92,24 @@ class ToolkitStoreTests(IsolatedAsyncioTestCase):
             self.assertTrue(settings.live_data_updates)
             self.assertEqual(settings.scan_interval, 15)
             self.assertEqual(settings.data_update_interval, 15)
+
+    async def test_concurrent_miner_writes_are_serialized(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ToolkitStore(Path(directory) / "toolkit.sqlite3")
+            await store.initialize()
+
+            async def save(index: int) -> None:
+                timestamp = time.time() + index
+                ip = f"10.0.0.{index}"
+                record = MinerRecord(ip=ip, data={"index": index}, last_seen=timestamp)
+                point = HistoryPoint(timestamp=timestamp, hashrate_value=index)
+                await store.save_miner(record)
+                await store.save_history_point(ip, point)
+
+            await asyncio.gather(*(save(index) for index in range(1, 101)))
+
+            miners = await store.load_miners()
+
+            self.assertEqual(len(miners), 100)
+            self.assertEqual(miners["10.0.0.42"].data["index"], 42)
+            self.assertEqual(miners["10.0.0.42"].history[0].hashrate_value, 42)

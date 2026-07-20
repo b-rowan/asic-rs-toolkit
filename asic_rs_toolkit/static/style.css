@@ -377,11 +377,12 @@ label,
 
 .scan-progress {
   display: grid;
-  grid-template-columns: auto 96px auto;
+  grid-template-columns: minmax(0, 1fr) minmax(48px, 1.2fr) minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   min-height: 36px;
-  width: 260px;
+  width: clamp(260px, 34vw, 420px);
+  max-width: 100%;
   border: 1px solid var(--border-5);
   border-radius: 999px;
   padding: 0 12px;
@@ -405,11 +406,23 @@ label,
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+#scanProgressCount {
+  text-align: right;
+}
+
+#scanProgressDetail {
+  text-align: left;
+}
+
 .scan-progress-track {
-  width: 96px;
+  min-width: 0;
+  width: 100%;
   height: 6px;
   overflow: hidden;
   border-radius: 999px;
@@ -1869,7 +1882,8 @@ td strong {
   }
 
   .scan-progress {
-    grid-template-columns: auto minmax(72px, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) minmax(48px, 1.2fr) minmax(0, 1fr);
+    width: 100%;
   }
 
   .range-grid,
